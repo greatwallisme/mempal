@@ -3,3 +3,18 @@ name = "mempal-mcp"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+mempal-core = { path = "../mempal-core" }
+mempal-embed = { path = "../mempal-embed" }
+mempal-search = { path = "../mempal-search" }
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
