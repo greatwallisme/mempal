@@ -1,0 +1,12 @@
+[package]
+name = "mempal-embed"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+mempal-core = { path = "../mempal-core" }
+ort.workspace = true
+reqwest.workspace = true

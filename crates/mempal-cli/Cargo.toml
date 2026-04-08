@@ -1,0 +1,14 @@
+[package]
+name = "mempal-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+mempal-core = { path = "../mempal-core" }
+mempal-embed = { path = "../mempal-embed" }
+mempal-ingest = { path = "../mempal-ingest" }
+mempal-search = { path = "../mempal-search" }
+tokio.workspace = true

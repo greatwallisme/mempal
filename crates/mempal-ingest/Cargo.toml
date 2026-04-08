@@ -1,0 +1,11 @@
+[package]
+name = "mempal-ingest"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mempal-core = { path = "../mempal-core" }
+mempal-embed = { path = "../mempal-embed" }
+serde_json.workspace = true
