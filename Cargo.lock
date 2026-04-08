@@ -1092,8 +1092,12 @@ name = "mempal-search"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "mempal-core",
  "mempal-embed",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
