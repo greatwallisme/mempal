@@ -1041,6 +1041,8 @@ dependencies = [
  "mempal-embed",
  "mempal-ingest",
  "mempal-search",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 

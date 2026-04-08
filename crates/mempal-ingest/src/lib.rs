@@ -31,9 +31,9 @@ pub struct IngestStats {
     pub skipped: usize,
 }
 
-pub async fn ingest_file(
+pub async fn ingest_file<E: Embedder + ?Sized>(
     db: &Database,
-    embedder: &impl Embedder,
+    embedder: &E,
     path: &Path,
     wing: &str,
     room: Option<&str>,
@@ -102,9 +102,9 @@ pub async fn ingest_file(
     Ok(stats)
 }
 
-pub async fn ingest_dir(
+pub async fn ingest_dir<E: Embedder + ?Sized>(
     db: &Database,
-    embedder: &impl Embedder,
+    embedder: &E,
     dir: &Path,
     wing: &str,
     room: Option<&str>,

@@ -8,9 +8,9 @@ use crate::filter::build_filter_clause;
 
 pub mod filter;
 
-pub async fn search(
+pub async fn search<E: Embedder + ?Sized>(
     db: &Database,
-    embedder: &impl Embedder,
+    embedder: &E,
     query: &str,
     wing: Option<&str>,
     room: Option<&str>,
