@@ -254,5 +254,5 @@ mod rest_tests {
 #[cfg(not(feature = "rest"))]
 #[test]
 fn test_no_rest_feature() {
-    assert!(!cfg!(feature = "rest"));
+    const { assert!(!cfg!(feature = "rest")); }
 }
