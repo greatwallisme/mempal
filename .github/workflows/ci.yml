@@ -12,8 +12,16 @@ env:
 
 jobs:
   check:
-    name: test + clippy + build
+    name: ${{ matrix.label }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: default
+            cargo_args: ""
+          - label: all-features
+            cargo_args: "--all-features"
     steps:
       - uses: actions/checkout@v4
 
@@ -25,11 +33,11 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo clippy --workspace --all-targets -- -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy --workspace --all-targets ${{ matrix.cargo_args }} -- -D warnings
+        run: cargo clippy --workspace --all-targets ${{ matrix.cargo_args }} -- -D warnings
 
-      - name: cargo test --workspace
-        run: cargo test --workspace
+      - name: cargo test --workspace ${{ matrix.cargo_args }}
+        run: cargo test --workspace ${{ matrix.cargo_args }}
 
-      - name: cargo build --workspace --release
-        run: cargo build --workspace --release
+      - name: cargo build --workspace --release ${{ matrix.cargo_args }}
+        run: cargo build --workspace --release ${{ matrix.cargo_args }}
