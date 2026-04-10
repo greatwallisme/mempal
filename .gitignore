@@ -23,3 +23,7 @@ target
 
 # Local AI skills (not part of the project)
 skills/rust-skills/
+
+# Local benchmark data and generated benchmark logs
+/data/longmemeval/
+/benchmarks/*.jsonl

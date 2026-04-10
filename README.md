@@ -38,6 +38,8 @@ mempal search "auth decision clerk" --json
 mempal wake-up
 ```
 
+Need a complete walkthrough instead of the short path above: see [`docs/usage.md`](docs/usage.md).
+
 Typical output flow:
 
 ```bash
@@ -126,6 +128,33 @@ Supported modes:
 - `raw`: ingest raw user text
 - `aaak`: ingest AAAK-formatted text, query with raw questions
 - `rooms`: install benchmark taxonomy rooms and let `mempal` route by taxonomy
+
+Current `s_cleaned` snapshot, aligned to the public `mempalace` LongMemEval framing:
+
+| System | Mode | LongMemEval R@5 | External API Calls | Notes |
+|--------|------|-----------------|--------------------|-------|
+| `mempal` | raw + session | **96.6%** | Zero | Local ONNX embedder, full `500`-question run |
+| `mempal` | aaak + session | **95.2%** | Zero | Slightly below raw, but much closer than MemPalace's published AAAK result |
+| `mempal` | rooms + session | **87.8%** | Zero | Current taxonomy routing regresses on LongMemEval |
+| `mempalace` | Raw (published) | **96.6%** | Zero | Public README claim |
+| `mempalace` | AAAK (published) | **84.2%** | Zero | Public README claim |
+
+Interpretation:
+
+- `mempal` matches the published `mempalace` raw baseline on LongMemEval R@5.
+- `mempal` AAAK still regresses relative to raw, but far less than the published `mempalace` AAAK number.
+- `rooms` is not ready to be the default benchmark mode in `mempal`.
+- These numbers are honest only for the retrieval-only `LongMemEval s_cleaned` path. They do **not** imply parity on held-out, LoCoMo, rerank, or full answer-generation benchmarks.
+
+Artifacts from the local runs in this repository:
+
+- [`benchmarks/longmemeval_s_summary.md`](benchmarks/longmemeval_s_summary.md)
+
+The full JSONL ranking logs are generated locally under `benchmarks/*.jsonl` but are not checked into git.
+
+Cost note:
+
+- The zero-API claim above applies to the default local ONNX backend. If `mempal` is configured with `[embed] backend = "api"`, then even `raw` mode will incur embedding API calls.
 
 ### MCP
 

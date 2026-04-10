@@ -14,7 +14,7 @@ use mempal_core::{
 };
 use mempal_embed::{ConfiguredEmbedderFactory, Embedder};
 use mempal_search::search;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tempfile::tempdir;
 
 const BENCH_WING: &str = "longmemeval";
@@ -107,11 +107,36 @@ struct LongMemEvalEntry {
     question_id: String,
     question_type: String,
     question: String,
+    #[serde(deserialize_with = "deserialize_answer")]
     answer: String,
     haystack_sessions: Vec<Vec<LongMemEvalTurn>>,
     haystack_session_ids: Vec<String>,
     haystack_dates: Vec<String>,
     answer_session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum LongMemEvalAnswerValue {
+    Text(String),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+    Bool(bool),
+}
+
+fn deserialize_answer<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = LongMemEvalAnswerValue::deserialize(deserializer)?;
+    Ok(match value {
+        LongMemEvalAnswerValue::Text(text) => text,
+        LongMemEvalAnswerValue::Signed(number) => number.to_string(),
+        LongMemEvalAnswerValue::Unsigned(number) => number.to_string(),
+        LongMemEvalAnswerValue::Float(number) => number.to_string(),
+        LongMemEvalAnswerValue::Bool(value) => value.to_string(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -310,8 +335,10 @@ fn build_corpus(
                 let Some(text) = join_user_turns(session) else {
                     continue;
                 };
+                let item_ordinal = items.len();
                 items.push(build_corpus_item(
                     &codec,
+                    item_ordinal,
                     session_id.clone(),
                     text,
                     date.clone(),
@@ -324,8 +351,10 @@ fn build_corpus(
                     if turn.role != "user" {
                         continue;
                     }
+                    let item_ordinal = items.len();
                     items.push(build_corpus_item(
                         &codec,
+                        item_ordinal,
                         format!("{session_id}_turn_{turn_index}"),
                         turn.content.clone(),
                         date.clone(),
@@ -342,6 +371,7 @@ fn build_corpus(
 
 fn build_corpus_item(
     codec: &AaakCodec,
+    item_ordinal: usize,
     corpus_id: String,
     original_text: String,
     timestamp: String,
@@ -362,7 +392,8 @@ fn build_corpus_item(
             .document
             .to_string(),
     };
-    let drawer_id = build_drawer_id(BENCH_WING, None, &retrieval_text);
+    let drawer_id_seed = format!("{item_ordinal}\n{corpus_id}\n{retrieval_text}");
+    let drawer_id = build_drawer_id(BENCH_WING, None, &drawer_id_seed);
 
     CorpusItem {
         corpus_id,
@@ -828,6 +859,102 @@ mod tests {
             haystack_dates: vec!["2026-04-08".to_string(), "2026-04-09".to_string()],
             answer_session_ids: vec!["sess_auth".to_string()],
         }
+    }
+
+    fn duplicate_session_entry() -> LongMemEvalEntry {
+        LongMemEvalEntry {
+            question_id: "q-dup".to_string(),
+            question_type: "multi-session".to_string(),
+            question: "How many times did I repeat the note?".to_string(),
+            answer: "2".to_string(),
+            haystack_sessions: vec![
+                vec![LongMemEvalTurn {
+                    role: "user".to_string(),
+                    content: "Pick up three shirts from the store.".to_string(),
+                }],
+                vec![LongMemEvalTurn {
+                    role: "user".to_string(),
+                    content: "Pick up three shirts from the store.".to_string(),
+                }],
+            ],
+            haystack_session_ids: vec!["sess_1".to_string(), "sess_2".to_string()],
+            haystack_dates: vec!["2026-04-08".to_string(), "2026-04-09".to_string()],
+            answer_session_ids: vec!["sess_1".to_string(), "sess_2".to_string()],
+        }
+    }
+
+    fn duplicate_session_id_entry() -> LongMemEvalEntry {
+        LongMemEvalEntry {
+            question_id: "q-dup-id".to_string(),
+            question_type: "multi-session".to_string(),
+            question: "Which repeated session should be recalled?".to_string(),
+            answer: "2".to_string(),
+            haystack_sessions: vec![
+                vec![LongMemEvalTurn {
+                    role: "user".to_string(),
+                    content: "Remember the pickup is at the downtown store.".to_string(),
+                }],
+                vec![LongMemEvalTurn {
+                    role: "user".to_string(),
+                    content: "Remember the pickup is at the downtown store.".to_string(),
+                }],
+            ],
+            haystack_session_ids: vec!["sess_dup".to_string(), "sess_dup".to_string()],
+            haystack_dates: vec!["2026-04-08".to_string(), "2026-04-09".to_string()],
+            answer_session_ids: vec!["sess_dup".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_load_entries_accepts_numeric_answer() {
+        let temp = tempdir().expect("tempdir should be created");
+        let path = temp.path().join("longmemeval.json");
+        fs::write(
+            &path,
+            r#"[{
+                "question_id":"q-1",
+                "question_type":"multi-session",
+                "question":"How many items do I need to pick up?",
+                "question_date":"2023/02/15 (Wed) 23:50",
+                "answer":3,
+                "answer_session_ids":["answer_1"],
+                "haystack_dates":["2023/02/15 (Wed) 01:41"],
+                "haystack_session_ids":["sess_1"],
+                "haystack_sessions":[[
+                    {"role":"user","content":"Remember to pick up three shirts."}
+                ]]
+            }]"#,
+        )
+        .expect("fixture should be written");
+
+        let entries = load_entries(&path, 0, 0).expect("numeric answer should parse");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].answer, "3");
+    }
+
+    #[test]
+    fn test_build_corpus_assigns_unique_drawer_ids_for_duplicate_content() {
+        let items = build_corpus(
+            &duplicate_session_entry(),
+            LongMemEvalGranularity::Session,
+            BenchMode::Raw,
+        );
+
+        assert_eq!(items.len(), 2);
+        assert_ne!(items[0].drawer_id, items[1].drawer_id);
+    }
+
+    #[test]
+    fn test_build_corpus_assigns_unique_drawer_ids_for_duplicate_session_ids() {
+        let items = build_corpus(
+            &duplicate_session_id_entry(),
+            LongMemEvalGranularity::Session,
+            BenchMode::Raw,
+        );
+
+        assert_eq!(items.len(), 2);
+        assert_ne!(items[0].drawer_id, items[1].drawer_id);
     }
 
     #[test]
