@@ -27,3 +27,4 @@ skills/rust-skills/
 # Local benchmark data and generated benchmark logs
 /data/longmemeval/
 /benchmarks/*.jsonl
+skills/rust-skills/
