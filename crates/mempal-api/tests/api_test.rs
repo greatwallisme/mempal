@@ -48,6 +48,37 @@ mod rest_tests {
         }
     }
 
+    #[derive(Default)]
+    struct ZeroEmbedder;
+
+    #[async_trait::async_trait]
+    impl Embedder for ZeroEmbedder {
+        async fn embed(
+            &self,
+            texts: &[&str],
+        ) -> std::result::Result<Vec<Vec<f32>>, mempal_embed::EmbedError> {
+            Ok(texts.iter().map(|_| vec![0.0_f32; 384]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn name(&self) -> &str {
+            "zero"
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ZeroEmbedderFactory;
+
+    #[async_trait::async_trait]
+    impl EmbedderFactory for ZeroEmbedderFactory {
+        async fn build(&self) -> std::result::Result<Box<dyn Embedder>, mempal_embed::EmbedError> {
+            Ok(Box::new(ZeroEmbedder))
+        }
+    }
+
     fn fake_embedding(text: &str) -> Vec<f32> {
         let mut embedding = vec![0.0_f32; 384];
         for (index, byte) in text.bytes().enumerate() {
@@ -83,8 +114,41 @@ mod rest_tests {
             .expect("vector insert should succeed");
     }
 
+    fn insert_drawer_with_vector(
+        db: &Database,
+        id: &str,
+        content: &str,
+        wing: &str,
+        room: Option<&str>,
+        vector: &[f32],
+    ) {
+        db.insert_drawer(&Drawer {
+            id: id.to_string(),
+            content: content.to_string(),
+            wing: wing.to_string(),
+            room: room.map(ToOwned::to_owned),
+            source_file: Some(format!("/tmp/{id}.md")),
+            source_type: SourceType::Project,
+            added_at: "1712640000".to_string(),
+            chunk_index: Some(0),
+        })
+        .expect("drawer insert should succeed");
+
+        let vector_json = serde_json::to_string(vector).expect("vector JSON should serialize");
+        db.conn()
+            .execute(
+                "INSERT INTO drawer_vectors (id, embedding) VALUES (?1, vec_f32(?2))",
+                (id, vector_json.as_str()),
+            )
+            .expect("vector insert should succeed");
+    }
+
     fn app(db_path: PathBuf) -> axum::Router {
-        router(ApiState::new(db_path, Arc::new(TestEmbedderFactory)))
+        app_with_factory(db_path, Arc::new(TestEmbedderFactory))
+    }
+
+    fn app_with_factory(db_path: PathBuf, factory: Arc<dyn EmbedderFactory>) -> axum::Router {
+        router(ApiState::new(db_path, factory))
     }
 
     #[tokio::test]
@@ -114,6 +178,58 @@ mod rest_tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         assert!(payload.as_array().and_then(|items| items.first()).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_api_search_hybrid_rescues_code_query() {
+        let dir = tempdir().expect("temp dir should exist");
+        let db_path = dir.path().join("palace.db");
+        let db = open_db(&db_path);
+        insert_drawer_with_vector(
+            &db,
+            "drawer_a",
+            "generic auth notes",
+            "myapp",
+            Some("auth"),
+            &vec![0.0_f32; 384],
+        );
+        insert_drawer_with_vector(
+            &db,
+            "drawer_b",
+            "deployment checklist",
+            "myapp",
+            Some("deploy"),
+            &vec![0.0_f32; 384],
+        );
+        insert_drawer_with_vector(
+            &db,
+            "drawer_code",
+            "compiler failure around foo::bar in parser",
+            "myapp",
+            Some("auth"),
+            &vec![1.0_f32; 384],
+        );
+
+        let response = app_with_factory(db_path, Arc::new(ZeroEmbedderFactory))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=foo::bar&top_k=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let results = payload.as_array().expect("results should be an array");
+        assert!(
+            results.iter().any(|result| {
+                result.get("drawer_id").and_then(Value::as_str) == Some("drawer_code")
+            }),
+            "hybrid REST search should include the lexical hit even when vector top-k misses it: {payload:#?}"
+        );
     }
 
     #[tokio::test]

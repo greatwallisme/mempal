@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use mempal_core::config::Config;
 
-use crate::{
-    EMBEDDING_DIMENSIONS, EmbedError, Embedder, Result, api::ApiEmbedder, onnx::OnnxEmbedder,
-};
+use crate::{EmbedError, Embedder, Result, api::ApiEmbedder};
+
+/// Default embedding dimensions (used by API backend when no model is loaded).
+pub const DEFAULT_API_DIMENSIONS: usize = 384;
 
 #[async_trait]
 pub trait EmbedderFactory: Send + Sync {
@@ -25,7 +26,22 @@ impl ConfiguredEmbedderFactory {
 impl EmbedderFactory for ConfiguredEmbedderFactory {
     async fn build(&self) -> Result<Box<dyn Embedder>> {
         match self.config.embed.backend.as_str() {
-            "onnx" => Ok(Box::new(OnnxEmbedder::new_or_download().await?)),
+            #[cfg(feature = "model2vec")]
+            "model2vec" => {
+                let model_id = self
+                    .config
+                    .embed
+                    .model
+                    .as_deref()
+                    .unwrap_or("minishlab/potion-multilingual-128M");
+                Ok(Box::new(crate::model2vec::Model2VecEmbedder::new(
+                    model_id,
+                )?))
+            }
+            #[cfg(feature = "onnx")]
+            "onnx" => Ok(Box::new(
+                crate::onnx::OnnxEmbedder::new_or_download().await?,
+            )),
             "api" => Ok(Box::new(ApiEmbedder::new(
                 self.config
                     .embed
@@ -33,7 +49,7 @@ impl EmbedderFactory for ConfiguredEmbedderFactory {
                     .clone()
                     .unwrap_or_else(|| "http://localhost:11434/api/embeddings".to_string()),
                 self.config.embed.api_model.clone(),
-                EMBEDDING_DIMENSIONS,
+                DEFAULT_API_DIMENSIONS,
             ))),
             backend => Err(EmbedError::UnsupportedBackend(backend.to_string())),
         }

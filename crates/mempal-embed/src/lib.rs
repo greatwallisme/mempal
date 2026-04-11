@@ -6,11 +6,12 @@ use thiserror::Error;
 
 pub mod api;
 pub mod factory;
+#[cfg(feature = "model2vec")]
+pub mod model2vec;
+#[cfg(feature = "onnx")]
 pub mod onnx;
 
 pub use factory::{ConfiguredEmbedderFactory, EmbedderFactory};
-
-pub const EMBEDDING_DIMENSIONS: usize = 384;
 
 pub type Result<T> = std::result::Result<T, EmbedError>;
 

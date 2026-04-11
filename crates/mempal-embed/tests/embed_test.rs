@@ -1,70 +1,75 @@
-use std::sync::Arc;
-
 use axum::{Json, Router, routing::post};
-use mempal_embed::{Embedder, api::ApiEmbedder, onnx::OnnxEmbedder};
+use mempal_embed::{Embedder, api::ApiEmbedder};
 use serde_json::Value;
-use tokio::sync::OnceCell;
 
-async fn shared_onnx_embedder() -> Arc<OnnxEmbedder> {
-    static EMBEDDER: OnceCell<Arc<OnnxEmbedder>> = OnceCell::const_new();
+#[cfg(feature = "onnx")]
+mod onnx_tests {
+    use std::sync::Arc;
 
-    EMBEDDER
-        .get_or_init(|| async {
-            Arc::new(
-                OnnxEmbedder::new_or_download()
-                    .await
-                    .expect("onnx embedder should initialize"),
-            )
-        })
-        .await
-        .clone()
-}
+    use mempal_embed::{Embedder, onnx::OnnxEmbedder};
+    use tokio::sync::OnceCell;
 
-#[tokio::test]
-async fn test_embed_empty() {
-    let embedder = shared_onnx_embedder().await;
-    let result = embedder
-        .embed(&[])
-        .await
-        .expect("empty embedding batch should succeed");
+    async fn shared_onnx_embedder() -> Arc<OnnxEmbedder> {
+        static EMBEDDER: OnceCell<Arc<OnnxEmbedder>> = OnceCell::const_new();
 
-    assert!(result.is_empty());
-}
+        EMBEDDER
+            .get_or_init(|| async {
+                Arc::new(
+                    OnnxEmbedder::new_or_download()
+                        .await
+                        .expect("onnx embedder should initialize"),
+                )
+            })
+            .await
+            .clone()
+    }
 
-#[tokio::test]
-async fn test_onnx_dimensions() {
-    let embedder = shared_onnx_embedder().await;
+    #[tokio::test]
+    async fn test_embed_empty() {
+        let embedder = shared_onnx_embedder().await;
+        let result = embedder
+            .embed(&[])
+            .await
+            .expect("empty embedding batch should succeed");
 
-    assert_eq!(embedder.dimensions(), 384);
-}
+        assert!(result.is_empty());
+    }
 
-#[tokio::test]
-async fn test_onnx_embed_single() {
-    let embedder = shared_onnx_embedder().await;
-    let vectors = embedder
-        .embed(&["hello world"])
-        .await
-        .expect("single embedding should succeed");
+    #[tokio::test]
+    async fn test_onnx_dimensions() {
+        let embedder = shared_onnx_embedder().await;
 
-    assert_eq!(vectors.len(), 1);
-    assert_eq!(vectors[0].len(), 384);
-    assert!(
-        vectors[0]
-            .iter()
-            .all(|value| *value >= -1.0 && *value <= 1.0)
-    );
-}
+        assert_eq!(embedder.dimensions(), 384);
+    }
 
-#[tokio::test]
-async fn test_onnx_batch() {
-    let embedder = shared_onnx_embedder().await;
-    let vectors = embedder
-        .embed(&["text a", "text b", "text c"])
-        .await
-        .expect("batch embedding should succeed");
+    #[tokio::test]
+    async fn test_onnx_embed_single() {
+        let embedder = shared_onnx_embedder().await;
+        let vectors = embedder
+            .embed(&["hello world"])
+            .await
+            .expect("single embedding should succeed");
 
-    assert_eq!(vectors.len(), 3);
-    assert!(vectors.iter().all(|vector| vector.len() == 384));
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].len(), 384);
+        assert!(
+            vectors[0]
+                .iter()
+                .all(|value| *value >= -1.0 && *value <= 1.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_onnx_batch() {
+        let embedder = shared_onnx_embedder().await;
+        let vectors = embedder
+            .embed(&["text a", "text b", "text c"])
+            .await
+            .expect("batch embedding should succeed");
+
+        assert_eq!(vectors.len(), 3);
+        assert!(vectors.iter().all(|vector| vector.len() == 384));
+    }
 }
 
 #[tokio::test]

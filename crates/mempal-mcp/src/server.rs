@@ -5,10 +5,10 @@ use anyhow::Context;
 use mempal_core::{
     db::Database,
     types::{Drawer, SourceType, Triple},
-    utils::{build_drawer_id, current_timestamp, source_file_or_synthetic},
+    utils::{build_drawer_id, build_triple_id, current_timestamp, source_file_or_synthetic},
 };
 use mempal_embed::EmbedderFactory;
-use mempal_search::{resolve_route, search_by_vector};
+use mempal_search::{resolve_route, search_with_vector};
 use rmcp::{
     ErrorData, Json, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -120,8 +120,14 @@ impl MempalMcpServer {
             request.room.as_deref(),
         )
         .map_err(|error| ErrorData::internal_error(format!("routing failed: {error}"), None))?;
-        let results = search_by_vector(&db, &query_vector, route, request.top_k.unwrap_or(10))
-            .map_err(|error| ErrorData::internal_error(format!("search failed: {error}"), None))?;
+        let results = search_with_vector(
+            &db,
+            &request.query,
+            &query_vector,
+            route,
+            request.top_k.unwrap_or(10),
+        )
+        .map_err(|error| ErrorData::internal_error(format!("search failed: {error}"), None))?;
 
         Ok(Json(SearchResponse {
             results: results.into_iter().map(SearchResultDto::from).collect(),
@@ -269,12 +275,7 @@ impl MempalMcpServer {
                 let object = request
                     .object
                     .ok_or_else(|| ErrorData::invalid_params("missing object", None))?;
-                let id = format!(
-                    "triple_{}_{}_{:x}",
-                    subject.chars().take(8).collect::<String>(),
-                    predicate.chars().take(8).collect::<String>(),
-                    md5_hash(&format!("{subject}|{predicate}|{object}"))
-                );
+                let id = build_triple_id(&subject, &predicate, &object);
                 let triple = Triple {
                     id: id.clone(),
                     subject,
@@ -372,14 +373,4 @@ fn triple_to_dto(triple: &Triple) -> TripleDto {
         confidence: triple.confidence,
         source_drawer: triple.source_drawer.clone(),
     }
-}
-
-fn md5_hash(input: &str) -> u64 {
-    // Simple hash for triple ID generation (not cryptographic)
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in input.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }

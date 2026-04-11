@@ -24,10 +24,9 @@ CREATE TABLE IF NOT EXISTS drawers (
     chunk_index INTEGER
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS drawer_vectors USING vec0(
-    id TEXT PRIMARY KEY,
-    embedding FLOAT[384]
-);
+-- drawer_vectors is created lazily by insert_vector() with the actual
+-- embedding dimension from the configured embedder. This avoids hardcoding
+-- a dimension that may not match the model in use.
 
 CREATE TABLE IF NOT EXISTS triples (
     id TEXT PRIMARY KEY,
@@ -250,11 +249,32 @@ impl Database {
     }
 
     pub fn insert_vector(&self, drawer_id: &str, vector: &[f32]) -> Result<(), DbError> {
+        self.ensure_vectors_table(vector.len())?;
         let vector_json = serde_json::to_string(vector)?;
         self.conn.execute(
             "INSERT INTO drawer_vectors (id, embedding) VALUES (?1, vec_f32(?2))",
             (drawer_id, vector_json.as_str()),
         )?;
+        Ok(())
+    }
+
+    /// Ensure drawer_vectors table exists with the right dimension.
+    /// Creates it on first call; errors on dimension mismatch.
+    fn ensure_vectors_table(&self, dim: usize) -> Result<(), DbError> {
+        // Check if table exists
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='drawer_vectors')",
+                [],
+                |row| row.get(0),
+            )?;
+
+        if !exists {
+            self.conn.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE drawer_vectors USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{dim}]);"
+            ))?;
+        }
         Ok(())
     }
 
@@ -363,9 +383,18 @@ impl Database {
             return Ok(0);
         }
 
+        // Check if drawer_vectors table exists (lazy-created)
+        let vectors_exist: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='drawer_vectors')",
+            [],
+            |row| row.get(0),
+        )?;
+
         for id in &ids {
-            self.conn
-                .execute("DELETE FROM drawer_vectors WHERE id = ?1", [id])?;
+            if vectors_exist {
+                self.conn
+                    .execute("DELETE FROM drawer_vectors WHERE id = ?1", [id])?;
+            }
             self.conn
                 .execute("DELETE FROM drawers WHERE id = ?1", [id])?;
         }
@@ -390,6 +419,9 @@ impl Database {
         room: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>, DbError> {
+        let Some(match_query) = build_fts_match_query(query) else {
+            return Ok(Vec::new());
+        };
         let limit =
             i64::try_from(limit).map_err(|_| DbError::InvalidSourceType("limit".to_string()))?;
         let mut stmt = self.conn.prepare(
@@ -406,7 +438,7 @@ impl Database {
             "#,
         )?;
         let rows = stmt
-            .query_map((query, wing, room, limit), |row| {
+            .query_map((match_query.as_str(), wing, room, limit), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -518,6 +550,51 @@ impl Database {
                 (room, wings)
             })
             .collect())
+    }
+
+    // --- Embedding dimension management ---
+
+    /// Returns the current embedding dimension from the vec0 table, or None if the table is empty.
+    pub fn embedding_dim(&self) -> Result<Option<usize>, DbError> {
+        // sqlite-vec stores dimension in table schema; probe by checking a row
+        let result: std::result::Result<i64, _> = self.conn.query_row(
+            "SELECT vec_length(embedding) FROM drawer_vectors LIMIT 1",
+            [],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(dim) => Ok(Some(dim as usize)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DbError::Sqlite(e)),
+        }
+    }
+
+    /// Drop and recreate the drawer_vectors table with the specified dimension.
+    /// All existing vectors are lost — caller must re-embed after this.
+    pub fn recreate_vectors_table(&self, dim: usize) -> Result<(), DbError> {
+        self.conn.execute_batch(&format!(
+            r#"
+            DROP TABLE IF EXISTS drawer_vectors;
+            CREATE VIRTUAL TABLE drawer_vectors USING vec0(
+                id TEXT PRIMARY KEY,
+                embedding FLOAT[{dim}]
+            );
+            "#
+        ))?;
+        Ok(())
+    }
+
+    /// Returns all active (non-deleted) drawer IDs and their content for re-embedding.
+    pub fn all_active_drawers(&self) -> Result<Vec<(String, String)>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, content FROM drawers WHERE deleted_at IS NULL ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn database_size_bytes(&self) -> Result<u64, DbError> {
@@ -669,4 +746,19 @@ fn parse_keywords(raw: Option<&str>) -> Result<Vec<String>, DbError> {
         .collect();
 
     Ok(keywords)
+}
+
+fn build_fts_match_query(query: &str) -> Option<String> {
+    let terms = query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" AND "))
+    }
 }

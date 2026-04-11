@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use ort::{session::Session, session::SessionOutputs, value::Tensor};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 
-use crate::{EMBEDDING_DIMENSIONS, EmbedError, Embedder, Result};
+use crate::{EmbedError, Embedder, Result};
+
+/// MiniLM-L6-v2 produces 384-dimensional embeddings.
+const EMBEDDING_DIMENSIONS: usize = 384;
 
 const MODEL_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";

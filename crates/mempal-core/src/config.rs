@@ -6,7 +6,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 const DEFAULT_DB_PATH: &str = "~/.mempal/palace.db";
-const DEFAULT_EMBED_BACKEND: &str = "onnx";
+const DEFAULT_EMBED_BACKEND: &str = "model2vec";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -45,6 +45,8 @@ impl Config {
 #[serde(default)]
 pub struct EmbedConfig {
     pub backend: String,
+    /// Model identifier (e.g., "minishlab/potion-multilingual-128M" for model2vec).
+    pub model: Option<String>,
     pub api_endpoint: Option<String>,
     pub api_model: Option<String>,
 }
@@ -53,6 +55,7 @@ impl Default for EmbedConfig {
     fn default() -> Self {
         Self {
             backend: DEFAULT_EMBED_BACKEND.to_string(),
+            model: None,
             api_endpoint: None,
             api_model: None,
         }

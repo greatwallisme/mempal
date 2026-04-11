@@ -27,6 +27,27 @@ impl Embedder for TestEmbedder {
     }
 }
 
+#[derive(Default)]
+struct ZeroEmbedder;
+
+#[async_trait::async_trait]
+impl Embedder for ZeroEmbedder {
+    async fn embed(
+        &self,
+        texts: &[&str],
+    ) -> std::result::Result<Vec<Vec<f32>>, mempal_embed::EmbedError> {
+        Ok(texts.iter().map(|_| vec![0.0_f32; 384]).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        384
+    }
+
+    fn name(&self) -> &str {
+        "zero"
+    }
+}
+
 fn fake_embedding(text: &str) -> Vec<f32> {
     let mut embedding = vec![0.0_f32; 384];
     for (index, byte) in text.bytes().enumerate() {
@@ -55,13 +76,32 @@ fn insert_drawer(
     })
     .expect("drawer insert should succeed");
 
-    let vector_json =
-        serde_json::to_string(&fake_embedding(content)).expect("vector JSON should serialize");
-    db.conn()
-        .execute(
-            "INSERT INTO drawer_vectors (id, embedding) VALUES (?1, vec_f32(?2))",
-            (id, vector_json.as_str()),
-        )
+    db.insert_vector(id, &fake_embedding(content))
+        .expect("vector insert should succeed");
+}
+
+fn insert_drawer_with_vector(
+    db: &Database,
+    id: &str,
+    content: &str,
+    wing: &str,
+    room: Option<&str>,
+    source_file: Option<&str>,
+    vector: &[f32],
+) {
+    db.insert_drawer(&Drawer {
+        id: id.to_string(),
+        content: content.to_string(),
+        wing: wing.to_string(),
+        room: room.map(ToOwned::to_owned),
+        source_file: source_file.map(ToOwned::to_owned),
+        source_type: SourceType::Project,
+        added_at: "2026-04-08".to_string(),
+        chunk_index: Some(0),
+    })
+    .expect("drawer insert should succeed");
+
+    db.insert_vector(id, vector)
         .expect("vector insert should succeed");
 }
 
@@ -282,4 +322,48 @@ async fn test_search_routes_from_taxonomy() {
     assert_eq!(results[0].route.wing.as_deref(), Some("myapp"));
     assert_eq!(results[0].route.room.as_deref(), Some("auth"));
     assert!(results[0].route.confidence >= 0.5);
+}
+
+#[tokio::test]
+async fn test_search_hybrid_handles_code_like_query() {
+    let dir = tempdir().expect("temp dir should be created");
+    let db = Database::open(&dir.path().join("test.db")).expect("database should open");
+    let embedder = ZeroEmbedder;
+
+    insert_drawer_with_vector(
+        &db,
+        "d1",
+        "generic auth notes",
+        "wing_a",
+        None,
+        Some("/tmp/a.md"),
+        &vec![0.0_f32; 384],
+    );
+    insert_drawer_with_vector(
+        &db,
+        "d2",
+        "deployment checklist",
+        "wing_a",
+        None,
+        Some("/tmp/b.md"),
+        &vec![0.0_f32; 384],
+    );
+    insert_drawer_with_vector(
+        &db,
+        "d3",
+        "compiler failure around foo::bar in parser",
+        "wing_a",
+        None,
+        Some("/tmp/c.md"),
+        &vec![1.0_f32; 384],
+    );
+
+    let results = search(&db, &embedder, "foo::bar", None, None, 2)
+        .await
+        .expect("search should succeed");
+
+    assert!(
+        results.iter().any(|result| result.drawer_id == "d3"),
+        "hybrid search should rescue code-like query via FTS even when vector top-k misses it: {results:#?}"
+    );
 }

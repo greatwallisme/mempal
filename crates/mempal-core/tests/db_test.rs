@@ -22,7 +22,9 @@ fn test_db_init() {
         .expect("table rows should collect");
 
     assert!(tables.contains(&"drawers".to_string()));
-    assert!(tables.contains(&"drawer_vectors".to_string()));
+    // drawer_vectors is lazy-created on first insert_vector() call,
+    // so it does not exist on a fresh database.
+    // assert!(tables.contains(&"drawer_vectors".to_string()));
     assert!(tables.contains(&"triples".to_string()));
     assert!(tables.contains(&"taxonomy".to_string()));
 

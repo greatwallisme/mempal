@@ -10,15 +10,21 @@ documentation.workspace = true
 rust-version.workspace = true
 readme = "../../README.md"
 
+[features]
+default = ["model2vec"]
+model2vec = ["dep:model2vec-rs"]
+onnx = ["dep:ort", "dep:tokenizers"]
+
 [dependencies]
 async-trait.workspace = true
 mempal-core = { path = "../mempal-core", version = "0.1.0" }
-ort.workspace = true
+model2vec-rs = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokenizers.workspace = true
+tokenizers = { workspace = true, optional = true }
 tokio.workspace = true
 
 [dev-dependencies]

@@ -19,6 +19,7 @@ path = "src/main.rs"
 [features]
 default = []
 rest = ["dep:mempal-api", "mempal-api/rest"]
+onnx = ["mempal-embed/onnx"]
 
 [dependencies]
 anyhow.workspace = true

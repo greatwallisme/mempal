@@ -21,6 +21,23 @@ pub fn build_drawer_id(wing: &str, room: Option<&str>, content: &str) -> String 
     )
 }
 
+pub fn build_triple_id(subject: &str, predicate: &str, object: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(subject.as_bytes());
+    hasher.update([0]);
+    hasher.update(predicate.as_bytes());
+    hasher.update([0]);
+    hasher.update(object.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+
+    format!(
+        "triple_{}_{}_{}",
+        sanitize_component_prefix(subject, 8),
+        sanitize_component_prefix(predicate, 8),
+        &digest[..8]
+    )
+}
+
 pub fn current_timestamp() -> String {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs().to_string(),
@@ -85,6 +102,16 @@ fn sanitize_component(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn sanitize_component_prefix(value: &str, max_len: usize) -> String {
+    let sanitized = sanitize_component(value);
+    let prefix: String = sanitized.chars().take(max_len).collect();
+    if prefix.is_empty() {
+        "x".to_string()
+    } else {
+        prefix
+    }
 }
 
 fn matched_keywords(

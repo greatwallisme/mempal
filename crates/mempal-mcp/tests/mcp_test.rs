@@ -98,13 +98,7 @@ fn insert_drawer(db: &Database, id: &str, content: &str, wing: &str, room: Optio
     })
     .expect("drawer insert should succeed");
 
-    let vector_json =
-        serde_json::to_string(&fake_embedding(content)).expect("vector JSON should serialize");
-    db.conn()
-        .execute(
-            "INSERT INTO drawer_vectors (id, embedding) VALUES (?1, vec_f32(?2))",
-            (id, vector_json.as_str()),
-        )
+    db.insert_vector(id, &fake_embedding(content))
         .expect("vector insert should succeed");
 }
 
@@ -128,12 +122,7 @@ fn insert_drawer_with_vector(
     })
     .expect("drawer insert should succeed");
 
-    let vector_json = serde_json::to_string(vector).expect("vector JSON should serialize");
-    db.conn()
-        .execute(
-            "INSERT INTO drawer_vectors (id, embedding) VALUES (?1, vec_f32(?2))",
-            (id, vector_json.as_str()),
-        )
+    db.insert_vector(id, vector)
         .expect("vector insert should succeed");
 }
 
@@ -348,10 +337,7 @@ async fn test_mcp_search_hybrid_rescues_code_query() -> anyhow::Result<()> {
         .expect("results array should exist");
     assert!(
         results.iter().any(|result| {
-            result
-                .get("drawer_id")
-                .and_then(Value::as_str)
-                == Some("drawer_code")
+            result.get("drawer_id").and_then(Value::as_str) == Some("drawer_code")
         }),
         "hybrid MCP search should include the lexical hit even when vector top-k misses it: {payload:#?}"
     );

@@ -7,7 +7,7 @@ use tempfile::tempdir;
 fn test_config_defaults() {
     let config = Config::default();
 
-    assert_eq!(config.embed.backend, "onnx");
+    assert_eq!(config.embed.backend, "model2vec");
     assert_eq!(config.db_path, "~/.mempal/palace.db");
 }
 

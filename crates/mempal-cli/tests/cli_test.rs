@@ -159,10 +159,11 @@ fn test_cli_ingest_dry_run_does_not_persist_and_writes_audit_log() {
         .conn()
         .query_row("SELECT COUNT(*) FROM drawers", [], |row| row.get(0))
         .expect("drawer count query should succeed");
+    // drawer_vectors may not exist yet (lazy creation) — that's fine for dry_run
     let vector_count: i64 = db
         .conn()
         .query_row("SELECT COUNT(*) FROM drawer_vectors", [], |row| row.get(0))
-        .expect("vector count query should succeed");
+        .unwrap_or(0);
     assert_eq!(drawer_count, 0);
     assert_eq!(vector_count, 0);
 
@@ -216,6 +217,29 @@ fn test_cli_status() {
     assert!(stdout.contains("db_size_bytes"));
     assert!(stdout.contains("myapp/auth"));
     assert!(stdout.contains("myapp/deploy"));
+}
+
+#[test]
+fn test_cli_kg_add_keeps_distinct_objects() {
+    let home = tempdir().expect("home temp dir should be created");
+    let _db = seed_db(home.path());
+
+    let first = run_cli(home.path(), &["kg", "add", "Kai", "recommends", "Clerk"]);
+    assert!(first.status.success(), "first kg add failed: {:?}", first);
+
+    let second = run_cli(home.path(), &["kg", "add", "Kai", "recommends", "Auth0"]);
+    assert!(
+        second.status.success(),
+        "second kg add failed: {:?}",
+        second
+    );
+
+    let db = seed_db(home.path());
+    let triple_count = db.triple_count().expect("triple count should succeed");
+    assert_eq!(
+        triple_count, 2,
+        "distinct objects should not collide in triple identity"
+    );
 }
 
 #[test]

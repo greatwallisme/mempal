@@ -10,7 +10,7 @@ use mempal_core::{
     types::{Drawer, RouteDecision, SearchResult, SourceType, TaxonomyEntry},
     utils::{build_drawer_id, current_timestamp, source_file_or_synthetic},
 };
-use mempal_search::{resolve_route, search_by_vector};
+use mempal_search::{resolve_route, search_with_vector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -141,8 +141,14 @@ async fn search_handler(
     let db = Database::open(&state.db_path).map_err(internal_error)?;
     let route = resolve_route(&db, &query.q, query.wing.as_deref(), query.room.as_deref())
         .map_err(internal_error)?;
-    let results = search_by_vector(&db, &query_vector, route, query.top_k.unwrap_or(10))
-        .map_err(internal_error)?;
+    let results = search_with_vector(
+        &db,
+        &query.q,
+        &query_vector,
+        route,
+        query.top_k.unwrap_or(10),
+    )
+    .map_err(internal_error)?;
 
     Ok(Json(
         results.into_iter().map(SearchResultDto::from).collect(),

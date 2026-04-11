@@ -80,6 +80,7 @@ enum Commands {
         #[arg(long)]
         before: Option<String>,
     },
+    Reindex,
     Kg {
         #[command(subcommand)]
         command: KgCommands,
@@ -196,6 +197,7 @@ async fn run() -> Result<()> {
         Commands::WakeUp { format } => wake_up_command(&db, format.as_deref()),
         Commands::Compress { text } => compress_command(&text),
         Commands::Bench { command } => bench_command(&config, command).await,
+        Commands::Reindex => reindex_command(&db, &config).await,
         Commands::Kg { command } => kg_command(&db, command),
         Commands::Tunnels => tunnels_command(&db),
         Commands::Taxonomy { command } => taxonomy_command(&db, command),
@@ -528,6 +530,51 @@ fn compress_command(text: &str) -> Result<()> {
     );
 
     println!("{}", output.document);
+    Ok(())
+}
+
+async fn reindex_command(db: &Database, config: &Config) -> Result<()> {
+    let embedder = build_embedder(config).await?;
+    let new_dim = embedder.dimensions();
+    let current_dim = db.embedding_dim().context("failed to read embedding dim")?;
+
+    println!("embedder: {} ({}d)", embedder.name(), new_dim);
+    if let Some(dim) = current_dim {
+        println!("current vector dim: {dim}");
+    } else {
+        println!("current vector dim: (empty table)");
+    }
+
+    // Recreate vectors table with new dimension
+    println!("recreating drawer_vectors with {new_dim} dimensions...");
+    db.recreate_vectors_table(new_dim)
+        .context("failed to recreate vectors table")?;
+
+    // Re-embed all active drawers
+    let drawers = db
+        .all_active_drawers()
+        .context("failed to load active drawers")?;
+    let total = drawers.len();
+    println!("re-embedding {total} drawers...");
+
+    let batch_size = 64;
+    let mut done = 0;
+    for chunk in drawers.chunks(batch_size) {
+        let texts: Vec<&str> = chunk.iter().map(|(_, content)| content.as_str()).collect();
+        let vectors = embedder.embed(&texts).await.context("embedding failed")?;
+
+        for ((id, _), vector) in chunk.iter().zip(vectors.iter()) {
+            db.insert_vector(id, vector)
+                .with_context(|| format!("failed to insert vector for {id}"))?;
+        }
+
+        done += chunk.len();
+        if total > batch_size {
+            println!("  {done}/{total}");
+        }
+    }
+
+    println!("reindex complete: {total} drawers, {new_dim}d vectors");
     Ok(())
 }
 
