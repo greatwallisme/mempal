@@ -37,6 +37,8 @@ pub enum SearchError {
     CollectSearchRows(#[source] rusqlite::Error),
     #[error("failed to load taxonomy entries")]
     LoadTaxonomy(#[source] mempal_core::db::DbError),
+    #[error("failed to run keyword search")]
+    KeywordSearch(#[source] mempal_core::db::DbError),
 }
 
 pub async fn search<E: Embedder + ?Sized>(
@@ -62,18 +64,67 @@ pub async fn search<E: Embedder + ?Sized>(
         .next()
         .ok_or(SearchError::MissingQueryVector)?;
 
+    search_with_vector(db, query, &query_vector, route, top_k)
+}
+
+pub fn search_with_vector(
+    db: &Database,
+    query: &str,
+    query_vector: &[f32],
+    route: RouteDecision,
+    top_k: usize,
+) -> Result<Vec<SearchResult>> {
+    if top_k == 0 {
+        return Ok(Vec::new());
+    }
+
     // Hybrid search: vector + BM25, merged via RRF
-    let vector_results = search_by_vector(db, &query_vector, route.clone(), top_k)?;
+    let vector_results = search_by_vector(db, query_vector, route.clone(), top_k)?;
 
     let fts_ids = db
         .search_fts(query, route.wing.as_deref(), route.room.as_deref(), top_k)
-        .unwrap_or_default();
+        .map_err(SearchError::KeywordSearch)?;
 
-    if fts_ids.is_empty() {
-        return Ok(vector_results);
+    let mut results = if fts_ids.is_empty() {
+        vector_results
+    } else {
+        rrf_merge(vector_results, &fts_ids, &route, db, top_k)
+    };
+
+    // Inject tunnel hints: for each result, check if its room exists in other wings
+    inject_tunnel_hints(db, &mut results);
+
+    Ok(results)
+}
+
+/// For each search result, check if its room appears in other wings (tunnel).
+/// If so, add the other wing names as tunnel_hints.
+fn inject_tunnel_hints(db: &Database, results: &mut [SearchResult]) {
+    let tunnels = match db.find_tunnels() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    if tunnels.is_empty() {
+        return;
     }
 
-    Ok(rrf_merge(vector_results, &fts_ids, &route, db, top_k))
+    // Build room → other-wings map
+    let tunnel_map: std::collections::HashMap<&str, &[String]> = tunnels
+        .iter()
+        .map(|(room, wings)| (room.as_str(), wings.as_slice()))
+        .collect();
+
+    for result in results.iter_mut() {
+        if let Some(room) = result.room.as_deref() {
+            if let Some(wings) = tunnel_map.get(room) {
+                result.tunnel_hints = wings
+                    .iter()
+                    .filter(|w| *w != &result.wing)
+                    .cloned()
+                    .collect();
+            }
+        }
+    }
 }
 
 /// Reciprocal Rank Fusion: merge vector and BM25 ranked lists.
@@ -117,6 +168,7 @@ fn rrf_merge(
                         source_file: source_file_or_synthetic(id, drawer.source_file.as_deref()),
                         similarity: 0.0, // will be overwritten below
                         route: route.clone(),
+                        tunnel_hints: vec![],
                     },
                 );
             }
@@ -221,6 +273,7 @@ pub fn search_by_vector(
                     source_file: source_file_or_synthetic(&drawer_id, source_file.as_deref()),
                     similarity: (1.0_f64 - distance) as f32,
                     route: route.clone(),
+                    tunnel_hints: vec![],
                 })
             },
         )

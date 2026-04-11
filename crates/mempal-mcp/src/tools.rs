@@ -39,6 +39,9 @@ pub struct SearchResultDto {
     pub source_file: String,
     pub similarity: f32,
     pub route: RouteDecisionDto,
+    /// Other wings sharing this room (tunnel cross-references).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tunnel_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -179,6 +182,7 @@ impl From<SearchResult> for SearchResultDto {
             source_file: value.source_file,
             similarity: value.similarity,
             route: value.route.into(),
+            tunnel_hints: value.tunnel_hints,
         }
     }
 }

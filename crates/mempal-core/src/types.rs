@@ -56,4 +56,7 @@ pub struct SearchResult {
     pub source_file: String,
     pub similarity: f32,
     pub route: RouteDecision,
+    /// Other wings that share this result's room (tunnel hints).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tunnel_hints: Vec<String>,
 }

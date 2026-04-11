@@ -16,7 +16,7 @@ use mempal_core::{
     db::Database,
     protocol::{DEFAULT_IDENTITY_HINT, MEMORY_PROTOCOL},
     types::TaxonomyEntry,
-    utils::current_timestamp,
+    utils::{build_triple_id, current_timestamp},
 };
 use mempal_embed::{ConfiguredEmbedderFactory, Embedder};
 use mempal_ingest::{IngestOptions, IngestStats, ingest_dir, ingest_dir_with_options};
@@ -398,6 +398,9 @@ async fn search_command(
             result.similarity, result.wing, room, result.drawer_id
         );
         println!("source: {source_file}");
+        if !result.tunnel_hints.is_empty() {
+            println!("tunnel: also in {}", result.tunnel_hints.join(", "));
+        }
         println!("{}", result.content);
         println!();
     }
@@ -609,11 +612,7 @@ fn kg_command(db: &Database, command: KgCommands) -> Result<()> {
             object,
             source_drawer,
         } => {
-            let id = format!(
-                "triple_{}_{}",
-                subject.chars().take(8).collect::<String>(),
-                predicate.chars().take(8).collect::<String>(),
-            );
+            let id = build_triple_id(&subject, &predicate, &object);
             let triple = Triple {
                 id: id.clone(),
                 subject: subject.clone(),

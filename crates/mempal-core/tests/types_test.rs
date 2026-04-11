@@ -32,6 +32,7 @@ fn test_search_result_has_citation() {
             confidence: 1.0,
             reason: "explicit filters provided: w".into(),
         },
+        tunnel_hints: vec![],
     };
 
     assert!(!result.source_file.is_empty());
