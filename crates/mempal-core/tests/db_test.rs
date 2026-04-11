@@ -27,7 +27,7 @@ fn test_db_init() {
     assert!(tables.contains(&"taxonomy".to_string()));
 
     let schema_version: u32 = db.schema_version().expect("schema version should load");
-    assert_eq!(schema_version, 2);
+    assert_eq!(schema_version, 3);
 
     let indexes: Vec<String> = db
         .conn()
@@ -70,7 +70,7 @@ fn test_db_idempotent() {
         reopened
             .schema_version()
             .expect("schema version should load after reopen"),
-        2
+        3
     );
 }
 
@@ -103,7 +103,7 @@ fn test_db_migrates_legacy_schema_without_user_version() {
     assert_eq!(
         db.schema_version()
             .expect("schema version should be upgraded"),
-        2
+        3
     );
 
     let count: i64 = db
@@ -209,4 +209,147 @@ fn test_scope_counts_excludes_deleted() {
     let scopes = db.scope_counts().expect("scopes");
     assert_eq!(scopes.len(), 1);
     assert_eq!(scopes[0].2, 1); // only 1 active drawer
+}
+
+// --- FTS5 tests ---
+
+#[test]
+fn test_fts5_search_basic() {
+    let dir = tempdir().expect("temp dir");
+    let db = Database::open(&dir.path().join("test.db")).expect("db open");
+
+    let mut d1 = make_drawer("d1", "w");
+    d1.content = "Clerk authentication migration decision".into();
+    db.insert_drawer(&d1).expect("insert");
+
+    let mut d2 = make_drawer("d2", "w");
+    d2.content = "SQLite database performance tuning".into();
+    db.insert_drawer(&d2).expect("insert");
+
+    // BM25 search for "Clerk"
+    let results = db.search_fts("Clerk", None, None, 10).expect("fts search");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "d1");
+
+    // BM25 search for "SQLite"
+    let results = db.search_fts("SQLite", None, None, 10).expect("fts search");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "d2");
+}
+
+#[test]
+fn test_fts5_excludes_soft_deleted() {
+    let dir = tempdir().expect("temp dir");
+    let db = Database::open(&dir.path().join("test.db")).expect("db open");
+
+    let mut d1 = make_drawer("d1", "w");
+    d1.content = "important Clerk decision".into();
+    db.insert_drawer(&d1).expect("insert");
+
+    db.soft_delete_drawer("d1").expect("soft delete");
+
+    let results = db.search_fts("Clerk", None, None, 10).expect("fts search");
+    assert!(results.is_empty());
+}
+
+// --- Triples tests ---
+
+#[test]
+fn test_triple_crud() {
+    use mempal_core::types::Triple;
+
+    let dir = tempdir().expect("temp dir");
+    let db = Database::open(&dir.path().join("test.db")).expect("db open");
+
+    let triple = Triple {
+        id: "t1".into(),
+        subject: "Kai".into(),
+        predicate: "recommends".into(),
+        object: "Clerk".into(),
+        valid_from: Some("2026-04-10".into()),
+        valid_to: None,
+        confidence: 1.0,
+        source_drawer: None,
+    };
+    db.insert_triple(&triple).expect("insert triple");
+
+    // Query by subject
+    let results = db
+        .query_triples(Some("Kai"), None, None, true)
+        .expect("query");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].object, "Clerk");
+
+    // Query by object
+    let results = db
+        .query_triples(None, None, Some("Clerk"), true)
+        .expect("query");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].subject, "Kai");
+
+    // Invalidate
+    let ok = db.invalidate_triple("t1").expect("invalidate");
+    assert!(ok);
+
+    // Active-only query should return empty
+    let results = db
+        .query_triples(Some("Kai"), None, None, true)
+        .expect("query");
+    assert!(results.is_empty());
+
+    // All query should still find it
+    let results = db
+        .query_triples(Some("Kai"), None, None, false)
+        .expect("query");
+    assert_eq!(results.len(), 1);
+
+    assert_eq!(db.triple_count().expect("count"), 1);
+}
+
+// --- Tunnels tests ---
+
+#[test]
+fn test_tunnels_single_wing() {
+    let dir = tempdir().expect("temp dir");
+    let db = Database::open(&dir.path().join("test.db")).expect("db open");
+
+    let mut d = make_drawer("d1", "wing_a");
+    d.room = Some("auth".into());
+    db.insert_drawer(&d).expect("insert");
+
+    let tunnels = db.find_tunnels().expect("tunnels");
+    assert!(tunnels.is_empty()); // need 2+ wings for a tunnel
+}
+
+#[test]
+fn test_tunnels_cross_wing() {
+    let dir = tempdir().expect("temp dir");
+    let db = Database::open(&dir.path().join("test.db")).expect("db open");
+
+    let mut d1 = make_drawer("d1", "wing_a");
+    d1.room = Some("auth".into());
+    db.insert_drawer(&d1).expect("insert");
+
+    let mut d2 = make_drawer("d2", "wing_b");
+    d2.room = Some("auth".into());
+    db.insert_drawer(&d2).expect("insert");
+
+    let mut d3 = make_drawer("d3", "wing_a");
+    d3.room = Some("deploy".into());
+    db.insert_drawer(&d3).expect("insert");
+
+    let tunnels = db.find_tunnels().expect("tunnels");
+    assert_eq!(tunnels.len(), 1);
+    assert_eq!(tunnels[0].0, "auth");
+    assert!(tunnels[0].1.contains(&"wing_a".to_string()));
+    assert!(tunnels[0].1.contains(&"wing_b".to_string()));
+}
+
+// --- Schema version ---
+
+#[test]
+fn test_schema_version_is_3() {
+    let dir = tempdir().expect("temp dir");
+    let db = Database::open(&dir.path().join("test.db")).expect("db open");
+    assert_eq!(db.schema_version().expect("version"), 3);
 }

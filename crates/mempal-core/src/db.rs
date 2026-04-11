@@ -6,9 +6,9 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::types::{Drawer, SourceType, TaxonomyEntry};
+use crate::types::{Drawer, SourceType, TaxonomyEntry, Triple};
 
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 const V1_SCHEMA_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -381,6 +381,145 @@ impl Database {
         )?)
     }
 
+    // --- FTS5 BM25 search ---
+
+    pub fn search_fts(
+        &self,
+        query: &str,
+        wing: Option<&str>,
+        room: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, DbError> {
+        let limit =
+            i64::try_from(limit).map_err(|_| DbError::InvalidSourceType("limit".to_string()))?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT d.id, fts.rank
+            FROM drawers_fts fts
+            JOIN drawers d ON d.rowid = fts.rowid
+            WHERE drawers_fts MATCH ?1
+              AND d.deleted_at IS NULL
+              AND (?2 IS NULL OR d.wing = ?2)
+              AND (?3 IS NULL OR d.room = ?3)
+            ORDER BY fts.rank
+            LIMIT ?4
+            "#,
+        )?;
+        let rows = stmt
+            .query_map((query, wing, room, limit), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // --- Triples (Knowledge Graph) ---
+
+    pub fn insert_triple(&self, triple: &Triple) -> Result<(), DbError> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_drawer)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                triple.id,
+                triple.subject,
+                triple.predicate,
+                triple.object,
+                triple.valid_from,
+                triple.valid_to,
+                triple.confidence,
+                triple.source_drawer,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn query_triples(
+        &self,
+        subject: Option<&str>,
+        predicate: Option<&str>,
+        object: Option<&str>,
+        active_only: bool,
+    ) -> Result<Vec<Triple>, DbError> {
+        let active_clause = if active_only {
+            "AND (valid_to IS NULL OR valid_to > strftime('%s', 'now'))"
+        } else {
+            ""
+        };
+        let sql = format!(
+            r#"
+            SELECT id, subject, predicate, object, valid_from, valid_to, confidence, source_drawer
+            FROM triples
+            WHERE (?1 IS NULL OR subject = ?1)
+              AND (?2 IS NULL OR predicate = ?2)
+              AND (?3 IS NULL OR object = ?3)
+              {active_clause}
+            ORDER BY confidence DESC, id
+            "#
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map((subject, predicate, object), |row| {
+                Ok(Triple {
+                    id: row.get(0)?,
+                    subject: row.get(1)?,
+                    predicate: row.get(2)?,
+                    object: row.get(3)?,
+                    valid_from: row.get(4)?,
+                    valid_to: row.get(5)?,
+                    confidence: row.get(6)?,
+                    source_drawer: row.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn invalidate_triple(&self, triple_id: &str) -> Result<bool, DbError> {
+        let timestamp = crate::utils::current_timestamp();
+        let affected = self.conn.execute(
+            "UPDATE triples SET valid_to = ?1 WHERE id = ?2 AND valid_to IS NULL",
+            params![timestamp, triple_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn triple_count(&self) -> Result<i64, DbError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM triples", [], |row| row.get(0))?)
+    }
+
+    // --- Tunnels (cross-Wing discovery) ---
+
+    pub fn find_tunnels(&self) -> Result<Vec<(String, Vec<String>)>, DbError> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT room, GROUP_CONCAT(DISTINCT wing) as wings
+            FROM drawers
+            WHERE deleted_at IS NULL AND room IS NOT NULL AND room != ''
+            GROUP BY room
+            HAVING COUNT(DISTINCT wing) > 1
+            ORDER BY room
+            "#,
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let room: String = row.get(0)?;
+                let wings_csv: String = row.get(1)?;
+                Ok((room, wings_csv))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(room, wings_csv)| {
+                let wings = wings_csv.split(',').map(ToOwned::to_owned).collect();
+                (room, wings)
+            })
+            .collect())
+    }
+
     pub fn database_size_bytes(&self) -> Result<u64, DbError> {
         fs::metadata(&self.path)
             .map(|metadata| metadata.len())
@@ -430,6 +569,33 @@ ALTER TABLE drawers ADD COLUMN deleted_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_drawers_deleted_at ON drawers(deleted_at);
 "#;
 
+const V3_MIGRATION_SQL: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS drawers_fts USING fts5(
+    content,
+    content='drawers',
+    content_rowid='rowid'
+);
+
+-- Populate FTS from existing drawers (excluding soft-deleted)
+INSERT INTO drawers_fts(rowid, content)
+    SELECT rowid, content FROM drawers WHERE deleted_at IS NULL;
+
+-- Keep FTS in sync: INSERT trigger
+CREATE TRIGGER IF NOT EXISTS drawers_ai AFTER INSERT ON drawers BEGIN
+    INSERT INTO drawers_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+-- Keep FTS in sync: soft-delete (UPDATE deleted_at) removes from FTS
+CREATE TRIGGER IF NOT EXISTS drawers_au_softdelete AFTER UPDATE OF deleted_at ON drawers
+    WHEN new.deleted_at IS NOT NULL AND old.deleted_at IS NULL BEGIN
+    INSERT INTO drawers_fts(drawers_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+END;
+
+-- No DELETE trigger on drawers — soft-deleted rows are already removed from FTS
+-- by the UPDATE trigger above. Physical DELETE (purge) skips FTS because the
+-- entry is already gone.
+"#;
+
 fn migrations() -> &'static [Migration] {
     static MIGRATIONS: &[Migration] = &[
         Migration {
@@ -439,6 +605,10 @@ fn migrations() -> &'static [Migration] {
         Migration {
             version: 2,
             sql: V2_MIGRATION_SQL,
+        },
+        Migration {
+            version: 3,
+            sql: V3_MIGRATION_SQL,
         },
     ];
     MIGRATIONS

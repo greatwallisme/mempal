@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use mempal_core::{
     db::Database,
-    types::{Drawer, SourceType},
+    types::{Drawer, SourceType, Triple},
     utils::{build_drawer_id, current_timestamp, source_file_or_synthetic},
 };
 use mempal_embed::EmbedderFactory;
@@ -17,9 +17,9 @@ use rmcp::{
 };
 
 use crate::tools::{
-    DeleteRequest, DeleteResponse, IngestRequest, IngestResponse, ScopeCount, SearchRequest,
-    SearchResponse, SearchResultDto, StatusResponse, TaxonomyEntryDto, TaxonomyRequest,
-    TaxonomyResponse,
+    DeleteRequest, DeleteResponse, IngestRequest, IngestResponse, KgRequest, KgResponse,
+    ScopeCount, SearchRequest, SearchResponse, SearchResultDto, StatusResponse, TaxonomyEntryDto,
+    TaxonomyRequest, TaxonomyResponse, TripleDto, TunnelDto, TunnelsResponse,
 };
 
 #[derive(Clone)]
@@ -248,6 +248,100 @@ impl MempalMcpServer {
             )),
         }
     }
+
+    #[tool(
+        name = "mempal_kg",
+        description = "Knowledge graph: add, query, or invalidate triples (subject-predicate-object). Use 'add' to record structured relationships between entities. Use 'query' to find relationships by subject, predicate, or object. Use 'invalidate' to mark a triple as no longer valid."
+    )]
+    async fn mempal_kg(
+        &self,
+        Parameters(request): Parameters<KgRequest>,
+    ) -> std::result::Result<Json<KgResponse>, ErrorData> {
+        let db = self.open_db()?;
+        match request.action.as_str() {
+            "add" => {
+                let subject = request
+                    .subject
+                    .ok_or_else(|| ErrorData::invalid_params("missing subject", None))?;
+                let predicate = request
+                    .predicate
+                    .ok_or_else(|| ErrorData::invalid_params("missing predicate", None))?;
+                let object = request
+                    .object
+                    .ok_or_else(|| ErrorData::invalid_params("missing object", None))?;
+                let id = format!(
+                    "triple_{}_{}_{:x}",
+                    subject.chars().take(8).collect::<String>(),
+                    predicate.chars().take(8).collect::<String>(),
+                    md5_hash(&format!("{subject}|{predicate}|{object}"))
+                );
+                let triple = Triple {
+                    id: id.clone(),
+                    subject,
+                    predicate,
+                    object,
+                    valid_from: Some(current_timestamp()),
+                    valid_to: None,
+                    confidence: 1.0,
+                    source_drawer: request.source_drawer,
+                };
+                db.insert_triple(&triple).map_err(db_error)?;
+                Ok(Json(KgResponse {
+                    action: "add".to_string(),
+                    triples: vec![triple_to_dto(&triple)],
+                }))
+            }
+            "query" => {
+                let active_only = request.active_only.unwrap_or(true);
+                let triples = db
+                    .query_triples(
+                        request.subject.as_deref(),
+                        request.predicate.as_deref(),
+                        request.object.as_deref(),
+                        active_only,
+                    )
+                    .map_err(db_error)?;
+                Ok(Json(KgResponse {
+                    action: "query".to_string(),
+                    triples: triples.iter().map(triple_to_dto).collect(),
+                }))
+            }
+            "invalidate" => {
+                let triple_id = request
+                    .triple_id
+                    .ok_or_else(|| ErrorData::invalid_params("missing triple_id", None))?;
+                let invalidated = db.invalidate_triple(&triple_id).map_err(db_error)?;
+                let message = if invalidated {
+                    format!("triple {triple_id} invalidated")
+                } else {
+                    format!("triple {triple_id} not found or already invalidated")
+                };
+                Ok(Json(KgResponse {
+                    action: message,
+                    triples: vec![],
+                }))
+            }
+            action => Err(ErrorData::invalid_params(
+                format!("unsupported kg action: {action}"),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
+        name = "mempal_tunnels",
+        description = "Discover cross-wing tunnels: rooms that appear in multiple wings, enabling cross-domain knowledge discovery. Returns an empty list if only one wing exists."
+    )]
+    async fn mempal_tunnels(&self) -> std::result::Result<Json<TunnelsResponse>, ErrorData> {
+        let db = self.open_db()?;
+        let tunnels = db
+            .find_tunnels()
+            .map_err(db_error)?
+            .into_iter()
+            .map(|(room, wings)| TunnelDto { room, wings })
+            .collect();
+        Ok(Json(TunnelsResponse { tunnels }))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -265,4 +359,27 @@ impl ServerHandler for MempalMcpServer {
 
 fn db_error(error: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(format!("{error}"), None)
+}
+
+fn triple_to_dto(triple: &Triple) -> TripleDto {
+    TripleDto {
+        id: triple.id.clone(),
+        subject: triple.subject.clone(),
+        predicate: triple.predicate.clone(),
+        object: triple.object.clone(),
+        valid_from: triple.valid_from.clone(),
+        valid_to: triple.valid_to.clone(),
+        confidence: triple.confidence,
+        source_drawer: triple.source_drawer.clone(),
+    }
+}
+
+fn md5_hash(input: &str) -> u64 {
+    // Simple hash for triple ID generation (not cryptographic)
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }

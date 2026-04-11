@@ -121,6 +121,54 @@ pub struct TaxonomyEntryDto {
     pub keywords: Vec<String>,
 }
 
+// --- Knowledge Graph ---
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct KgRequest {
+    /// Action: "add", "query", or "invalidate".
+    pub action: String,
+    pub subject: Option<String>,
+    pub predicate: Option<String>,
+    pub object: Option<String>,
+    /// Triple ID (required for invalidate).
+    pub triple_id: Option<String>,
+    /// Only return currently-valid triples (default true).
+    pub active_only: Option<bool>,
+    /// Link to the source drawer that evidences this triple.
+    pub source_drawer: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct KgResponse {
+    pub action: String,
+    pub triples: Vec<TripleDto>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TripleDto {
+    pub id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    pub confidence: f64,
+    pub source_drawer: Option<String>,
+}
+
+// --- Tunnels ---
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TunnelsResponse {
+    pub tunnels: Vec<TunnelDto>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TunnelDto {
+    pub room: String,
+    pub wings: Vec<String>,
+}
+
 impl From<SearchResult> for SearchResultDto {
     fn from(value: SearchResult) -> Self {
         Self {

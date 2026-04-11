@@ -62,7 +62,83 @@ pub async fn search<E: Embedder + ?Sized>(
         .next()
         .ok_or(SearchError::MissingQueryVector)?;
 
-    search_by_vector(db, &query_vector, route, top_k)
+    // Hybrid search: vector + BM25, merged via RRF
+    let vector_results = search_by_vector(db, &query_vector, route.clone(), top_k)?;
+
+    let fts_ids = db
+        .search_fts(query, route.wing.as_deref(), route.room.as_deref(), top_k)
+        .unwrap_or_default();
+
+    if fts_ids.is_empty() {
+        return Ok(vector_results);
+    }
+
+    Ok(rrf_merge(vector_results, &fts_ids, &route, db, top_k))
+}
+
+/// Reciprocal Rank Fusion: merge vector and BM25 ranked lists.
+/// RRF score = sum(1 / (k + rank)) across both lists, with k=60.
+fn rrf_merge(
+    vector_results: Vec<SearchResult>,
+    fts_ids: &[(String, f64)],
+    route: &RouteDecision,
+    db: &Database,
+    top_k: usize,
+) -> Vec<SearchResult> {
+    use std::collections::HashMap;
+
+    const RRF_K: f64 = 60.0;
+
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    let mut result_map: HashMap<String, SearchResult> = HashMap::new();
+
+    // Score vector results
+    for (rank, result) in vector_results.into_iter().enumerate() {
+        let score = 1.0 / (RRF_K + rank as f64 + 1.0);
+        scores.insert(result.drawer_id.clone(), score);
+        result_map.insert(result.drawer_id.clone(), result);
+    }
+
+    // Score FTS results and merge
+    for (rank, (id, _bm25_score)) in fts_ids.iter().enumerate() {
+        let score = 1.0 / (RRF_K + rank as f64 + 1.0);
+        *scores.entry(id.clone()).or_default() += score;
+
+        // If this ID wasn't in vector results, load the drawer
+        if !result_map.contains_key(id) {
+            if let Ok(Some(drawer)) = db.get_drawer(id) {
+                result_map.insert(
+                    id.clone(),
+                    SearchResult {
+                        drawer_id: drawer.id,
+                        content: drawer.content,
+                        wing: drawer.wing,
+                        room: drawer.room,
+                        source_file: source_file_or_synthetic(id, drawer.source_file.as_deref()),
+                        similarity: 0.0, // will be overwritten below
+                        route: route.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    // Sort by RRF score descending, fill in similarity field
+    let mut merged: Vec<SearchResult> = scores
+        .into_iter()
+        .filter_map(|(id, rrf_score)| {
+            let mut result = result_map.remove(&id)?;
+            result.similarity = rrf_score as f32;
+            Some(result)
+        })
+        .collect();
+    merged.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged.truncate(top_k);
+    merged
 }
 
 pub fn search_by_vector(

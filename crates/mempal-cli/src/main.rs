@@ -80,6 +80,11 @@ enum Commands {
         #[arg(long)]
         before: Option<String>,
     },
+    Kg {
+        #[command(subcommand)]
+        command: KgCommands,
+    },
+    Tunnels,
     Taxonomy {
         #[command(subcommand)]
         command: TaxonomyCommands,
@@ -100,6 +105,28 @@ enum TaxonomyCommands {
         #[arg(long)]
         keywords: String,
     },
+}
+
+#[derive(Subcommand)]
+enum KgCommands {
+    Add {
+        subject: String,
+        predicate: String,
+        object: String,
+        #[arg(long)]
+        source_drawer: Option<String>,
+    },
+    Query {
+        #[arg(long)]
+        subject: Option<String>,
+        #[arg(long)]
+        predicate: Option<String>,
+        #[arg(long)]
+        object: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    List,
 }
 
 #[derive(Subcommand)]
@@ -169,6 +196,8 @@ async fn run() -> Result<()> {
         Commands::WakeUp { format } => wake_up_command(&db, format.as_deref()),
         Commands::Compress { text } => compress_command(&text),
         Commands::Bench { command } => bench_command(&config, command).await,
+        Commands::Kg { command } => kg_command(&db, command),
+        Commands::Tunnels => tunnels_command(&db),
         Commands::Taxonomy { command } => taxonomy_command(&db, command),
         Commands::Serve { mcp } => serve_command(&config, mcp).await,
         Commands::Status => status_command(&db),
@@ -570,6 +599,88 @@ fn append_audit_entry(db: &Database, command: &str, details: &serde_json::Value)
     Ok(())
 }
 
+fn kg_command(db: &Database, command: KgCommands) -> Result<()> {
+    use mempal_core::types::Triple;
+
+    match command {
+        KgCommands::Add {
+            subject,
+            predicate,
+            object,
+            source_drawer,
+        } => {
+            let id = format!(
+                "triple_{}_{}",
+                subject.chars().take(8).collect::<String>(),
+                predicate.chars().take(8).collect::<String>(),
+            );
+            let triple = Triple {
+                id: id.clone(),
+                subject: subject.clone(),
+                predicate: predicate.clone(),
+                object: object.clone(),
+                valid_from: Some(current_timestamp()),
+                valid_to: None,
+                confidence: 1.0,
+                source_drawer,
+            };
+            db.insert_triple(&triple)
+                .context("failed to insert triple")?;
+            println!("added: ({subject}) --[{predicate}]--> ({object})");
+            println!("  id: {id}");
+        }
+        KgCommands::Query {
+            subject,
+            predicate,
+            object,
+            all,
+        } => {
+            let triples = db
+                .query_triples(
+                    subject.as_deref(),
+                    predicate.as_deref(),
+                    object.as_deref(),
+                    !all,
+                )
+                .context("failed to query triples")?;
+            if triples.is_empty() {
+                println!("no triples found");
+            } else {
+                for t in &triples {
+                    let valid = match (&t.valid_from, &t.valid_to) {
+                        (Some(from), Some(to)) => format!("{from}..{to}"),
+                        (Some(from), None) => format!("{from}..now"),
+                        _ => "always".to_string(),
+                    };
+                    println!(
+                        "({}) --[{}]--> ({})  [{valid}]  id={}",
+                        t.subject, t.predicate, t.object, t.id
+                    );
+                }
+                println!("\n{} triple(s)", triples.len());
+            }
+        }
+        KgCommands::List => {
+            let count = db.triple_count().context("failed to count triples")?;
+            println!("triple_count: {count}");
+        }
+    }
+    Ok(())
+}
+
+fn tunnels_command(db: &Database) -> Result<()> {
+    let tunnels = db.find_tunnels().context("failed to find tunnels")?;
+    if tunnels.is_empty() {
+        println!("no tunnels (need rooms shared across multiple wings)");
+    } else {
+        for (room, wings) in &tunnels {
+            println!("room '{}' ↔ wings: {}", room, wings.join(", "));
+        }
+        println!("\n{} tunnel(s)", tunnels.len());
+    }
+    Ok(())
+}
+
 fn taxonomy_command(db: &Database, command: TaxonomyCommands) -> Result<()> {
     match command {
         TaxonomyCommands::List => taxonomy_list_command(db),
@@ -647,7 +758,12 @@ fn status_command(db: &Database) -> Result<()> {
     if deleted_count > 0 {
         println!("deleted_drawers: {deleted_count} (use `mempal purge` to remove)");
     }
+    let triple_count = db.triple_count().context("failed to count triples")?;
+
     println!("taxonomy_entries: {taxonomy_count}");
+    if triple_count > 0 {
+        println!("triples: {triple_count}");
+    }
     println!("db_size_bytes: {db_size_bytes}");
 
     let counts = db.scope_counts().context("failed to query scope counts")?;

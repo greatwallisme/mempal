@@ -42,6 +42,37 @@ impl EmbedderFactory for TestEmbedderFactory {
     }
 }
 
+#[derive(Default)]
+struct ZeroEmbedder;
+
+#[async_trait::async_trait]
+impl Embedder for ZeroEmbedder {
+    async fn embed(
+        &self,
+        texts: &[&str],
+    ) -> std::result::Result<Vec<Vec<f32>>, mempal_embed::EmbedError> {
+        Ok(texts.iter().map(|_| vec![0.0_f32; 384]).collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        384
+    }
+
+    fn name(&self) -> &str {
+        "zero"
+    }
+}
+
+#[derive(Clone, Default)]
+struct ZeroEmbedderFactory;
+
+#[async_trait::async_trait]
+impl EmbedderFactory for ZeroEmbedderFactory {
+    async fn build(&self) -> std::result::Result<Box<dyn Embedder>, mempal_embed::EmbedError> {
+        Ok(Box::new(ZeroEmbedder))
+    }
+}
+
 fn fake_embedding(text: &str) -> Vec<f32> {
     let mut embedding = vec![0.0_f32; 384];
     for (index, byte) in text.bytes().enumerate() {
@@ -77,11 +108,47 @@ fn insert_drawer(db: &Database, id: &str, content: &str, wing: &str, room: Optio
         .expect("vector insert should succeed");
 }
 
+fn insert_drawer_with_vector(
+    db: &Database,
+    id: &str,
+    content: &str,
+    wing: &str,
+    room: Option<&str>,
+    vector: &[f32],
+) {
+    db.insert_drawer(&Drawer {
+        id: id.to_string(),
+        content: content.to_string(),
+        wing: wing.to_string(),
+        room: room.map(ToOwned::to_owned),
+        source_file: Some(format!("/tmp/{id}.md")),
+        source_type: SourceType::Project,
+        added_at: "1712640000".to_string(),
+        chunk_index: Some(0),
+    })
+    .expect("drawer insert should succeed");
+
+    let vector_json = serde_json::to_string(vector).expect("vector JSON should serialize");
+    db.conn()
+        .execute(
+            "INSERT INTO drawer_vectors (id, embedding) VALUES (?1, vec_f32(?2))",
+            (id, vector_json.as_str()),
+        )
+        .expect("vector insert should succeed");
+}
+
 async fn spawn_server(
     db_path: PathBuf,
 ) -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, ()>> {
+    spawn_server_with_factory(db_path, Arc::new(TestEmbedderFactory)).await
+}
+
+async fn spawn_server_with_factory(
+    db_path: PathBuf,
+    embedder_factory: Arc<dyn EmbedderFactory>,
+) -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, ()>> {
     let (server_transport, client_transport) = tokio::io::duplex(4096);
-    let server = MempalMcpServer::new_with_factory(db_path, Arc::new(TestEmbedderFactory));
+    let server = MempalMcpServer::new_with_factory(db_path, embedder_factory);
     tokio::spawn(async move {
         let service = server.serve(server_transport).await?;
         service.waiting().await?;
@@ -103,12 +170,14 @@ async fn test_mcp_server_start() -> anyhow::Result<()> {
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 5);
+    assert_eq!(names.len(), 7);
     assert!(names.contains(&"mempal_status"));
     assert!(names.contains(&"mempal_search"));
     assert!(names.contains(&"mempal_ingest"));
     assert!(names.contains(&"mempal_delete"));
     assert!(names.contains(&"mempal_taxonomy"));
+    assert!(names.contains(&"mempal_kg"));
+    assert!(names.contains(&"mempal_tunnels"));
 
     client.cancel().await?;
     Ok(())
@@ -226,6 +295,72 @@ async fn test_mcp_search() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn test_mcp_search_hybrid_rescues_code_query() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let db_path = dir.path().join("palace.db");
+    let db = open_db(&db_path);
+    insert_drawer_with_vector(
+        &db,
+        "drawer_a",
+        "generic auth notes",
+        "myapp",
+        Some("auth"),
+        &vec![0.0_f32; 384],
+    );
+    insert_drawer_with_vector(
+        &db,
+        "drawer_b",
+        "deployment checklist",
+        "myapp",
+        Some("deploy"),
+        &vec![0.0_f32; 384],
+    );
+    insert_drawer_with_vector(
+        &db,
+        "drawer_code",
+        "compiler failure around foo::bar in parser",
+        "myapp",
+        Some("auth"),
+        &vec![1.0_f32; 384],
+    );
+
+    let client = spawn_server_with_factory(db_path, Arc::new(ZeroEmbedderFactory)).await?;
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("mempal_search").with_arguments(
+                serde_json::json!({
+                    "query": "foo::bar",
+                    "top_k": 2
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await?;
+
+    let payload = result
+        .structured_content
+        .expect("structured result should exist");
+    let results = payload
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("results array should exist");
+    assert!(
+        results.iter().any(|result| {
+            result
+                .get("drawer_id")
+                .and_then(Value::as_str)
+                == Some("drawer_code")
+        }),
+        "hybrid MCP search should include the lexical hit even when vector top-k misses it: {payload:#?}"
+    );
+
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_mcp_ingest() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let db_path = dir.path().join("palace.db");
@@ -331,7 +466,7 @@ async fn test_mcp_status_and_taxonomy() -> anyhow::Result<()> {
         .expect("status payload should exist");
     assert_eq!(
         status_payload.get("schema_version").and_then(Value::as_u64),
-        Some(2)
+        Some(3)
     );
     assert_eq!(
         status_payload.get("drawer_count").and_then(Value::as_i64),
