@@ -42,6 +42,16 @@ pub struct SearchResultDto {
     /// Other wings sharing this room (tunnel cross-references).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tunnel_hints: Vec<String>,
+    /// 3-4 letter entity codes derived from AAAK analysis.
+    pub entities: Vec<String>,
+    /// Topic keywords derived from AAAK analysis. May be empty.
+    pub topics: Vec<String>,
+    /// Classification flags derived from AAAK analysis. Always non-empty.
+    pub flags: Vec<String>,
+    /// Emotion tags derived from AAAK analysis. Always non-empty.
+    pub emotions: Vec<String>,
+    /// Importance derived from AAAK flags, normalized to the existing 2-4 scale.
+    pub importance_stars: u8,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -241,8 +251,10 @@ impl From<crate::cowork::PeekMessage> for PeekMessageDto {
     }
 }
 
-impl From<SearchResult> for SearchResultDto {
-    fn from(value: SearchResult) -> Self {
+impl SearchResultDto {
+    pub fn with_signals_from_result(value: SearchResult) -> Self {
+        let signals = crate::aaak::analyze(&value.content);
+
         Self {
             drawer_id: value.drawer_id,
             content: value.content,
@@ -252,6 +264,11 @@ impl From<SearchResult> for SearchResultDto {
             similarity: value.similarity,
             route: value.route.into(),
             tunnel_hints: value.tunnel_hints,
+            entities: signals.entities,
+            topics: signals.topics,
+            flags: signals.flags,
+            emotions: signals.emotions,
+            importance_stars: signals.importance_stars,
         }
     }
 }
@@ -275,5 +292,57 @@ impl From<TaxonomyEntry> for TaxonomyEntryDto {
             display_name: value.display_name,
             keywords: value.keywords,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::types::{RouteDecision, SearchResult};
+
+    use super::SearchResultDto;
+
+    fn sample_result(content: &str) -> SearchResult {
+        SearchResult {
+            drawer_id: "drawer-1".to_string(),
+            content: content.to_string(),
+            wing: "mempal".to_string(),
+            room: Some("signals".to_string()),
+            source_file: "/tmp/signals.md".to_string(),
+            similarity: 0.91,
+            route: RouteDecision {
+                wing: Some("mempal".to_string()),
+                room: Some("signals".to_string()),
+                confidence: 0.88,
+                reason: "unit test".to_string(),
+            },
+            tunnel_hints: vec!["docs".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_with_signals_preserves_raw_content_and_citations() {
+        let original = "We decided to use Arc<Mutex<>> for state because shared ownership mattered";
+        let dto = SearchResultDto::with_signals_from_result(sample_result(original));
+
+        assert_eq!(dto.content, original);
+        assert!(!dto.content.starts_with("V1|"));
+        assert!(!dto.content.contains('★'));
+        assert_eq!(dto.drawer_id, "drawer-1");
+        assert_eq!(dto.source_file, "/tmp/signals.md");
+        assert_eq!(dto.tunnel_hints, vec!["docs".to_string()]);
+        assert!(dto.flags.contains(&"DECISION".to_string()));
+        assert!(dto.importance_stars >= 2);
+        assert!(!dto.entities.is_empty());
+    }
+
+    #[test]
+    fn test_with_signals_applies_empty_content_sentinels() {
+        let dto = SearchResultDto::with_signals_from_result(sample_result(""));
+
+        assert_eq!(dto.entities, vec!["UNK".to_string()]);
+        assert_eq!(dto.flags, vec!["CORE".to_string()]);
+        assert_eq!(dto.emotions, vec!["determ".to_string()]);
+        assert!(dto.topics.is_empty());
+        assert_eq!(dto.importance_stars, 2);
     }
 }

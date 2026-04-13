@@ -334,7 +334,7 @@ impl AaakCodec {
     }
 }
 
-fn normalize_whitespace(text: &str) -> String {
+pub(crate) fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -343,7 +343,7 @@ fn normalize_whitespace(text: &str) -> String {
         .to_string()
 }
 
-fn extract_entities(text: &str) -> Vec<String> {
+pub(crate) fn extract_entities(text: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut entities = Vec::new();
 
@@ -367,7 +367,7 @@ fn extract_entities(text: &str) -> Vec<String> {
     entities
 }
 
-fn extract_topics(text: &str) -> Vec<String> {
+pub(crate) fn extract_topics(text: &str) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
         "the", "and", "for", "with", "over", "based", "this", "that", "was", "use", "why",
     ];
@@ -400,7 +400,7 @@ fn extract_topics(text: &str) -> Vec<String> {
     topics
 }
 
-fn detect_flags(text: &str) -> Vec<String> {
+pub(crate) fn detect_flags(text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     let mut flags = Vec::new();
 
@@ -416,7 +416,7 @@ fn detect_flags(text: &str) -> Vec<String> {
     flags
 }
 
-fn detect_emotions(text: &str) -> Vec<String> {
+pub(crate) fn detect_emotions(text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     let mut emotions = Vec::new();
 
@@ -433,7 +433,7 @@ fn detect_emotions(text: &str) -> Vec<String> {
     emotions
 }
 
-fn infer_weight(flags: &[String]) -> u8 {
+pub(crate) fn infer_weight(flags: &[String]) -> u8 {
     if flags
         .iter()
         .any(|flag| flag == "DECISION" || flag == "PIVOT")
@@ -477,7 +477,7 @@ fn replace_code(quote: &str, code: &str, name: &str) -> String {
     replaced
 }
 
-fn default_entity_code(entity: &str) -> String {
+pub(crate) fn default_entity_code(entity: &str) -> String {
     let ascii_code: String = entity
         .chars()
         .filter(|ch| ch.is_ascii_alphabetic())

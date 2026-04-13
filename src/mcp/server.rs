@@ -102,7 +102,7 @@ impl MempalMcpServer {
 
     #[tool(
         name = "mempal_search",
-        description = "Search persistent project memory via vector embedding with optional wing/room filters. PREFER THIS over grepping files or guessing from general knowledge when answering ANY project-specific question — past decisions, design rationale, implementation details, bug history, how a component works, why something was built a certain way, or any other project knowledge. Every result includes drawer_id and source_file for citation."
+        description = "Search persistent project memory via vector embedding with optional wing/room filters. PREFER THIS over grepping files or guessing from general knowledge when answering ANY project-specific question — past decisions, design rationale, implementation details, bug history, how a component works, why something was built a certain way, or any other project knowledge. Every result includes drawer_id and source_file for citation, plus structured AAAK-derived signals (`entities`, `topics`, `flags`, `emotions`, `importance_stars`) for filtering and ranking."
     )]
     async fn mempal_search(
         &self,
@@ -136,7 +136,10 @@ impl MempalMcpServer {
         .map_err(|error| ErrorData::internal_error(format!("search failed: {error}"), None))?;
 
         Ok(Json(SearchResponse {
-            results: results.into_iter().map(SearchResultDto::from).collect(),
+            results: results
+                .into_iter()
+                .map(SearchResultDto::with_signals_from_result)
+                .collect(),
         }))
     }
 
@@ -465,8 +468,9 @@ impl ServerHandler for MempalMcpServer {
         &self,
         request: rmcp::model::InitializeRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = std::result::Result<rmcp::model::InitializeResult, ErrorData>>
-    + Send
+    ) -> impl std::future::Future<
+        Output = std::result::Result<rmcp::model::InitializeResult, ErrorData>,
+    > + Send
     + '_ {
         // Capture the calling client's tool name so `mempal_peek_partner`
         // with `tool: "auto"` can infer which partner to read (e.g.,
@@ -525,5 +529,206 @@ fn triple_to_dto(triple: &Triple) -> TripleDto {
         valid_to: triple.valid_to.clone(),
         confidence: triple.confidence,
         source_drawer: triple.source_drawer.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::embed::Embedder;
+
+    #[derive(Clone)]
+    struct StubEmbedderFactory {
+        vector: Vec<f32>,
+    }
+
+    struct StubEmbedder {
+        vector: Vec<f32>,
+    }
+
+    #[async_trait]
+    impl crate::embed::EmbedderFactory for StubEmbedderFactory {
+        async fn build(&self) -> crate::embed::Result<Box<dyn Embedder>> {
+            Ok(Box::new(StubEmbedder {
+                vector: self.vector.clone(),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl Embedder for StubEmbedder {
+        async fn embed(&self, texts: &[&str]) -> crate::embed::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| self.vector.clone()).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.vector.len()
+        }
+
+        fn name(&self) -> &str {
+            "stub"
+        }
+    }
+
+    fn setup_server() -> (TempDir, PathBuf, MempalMcpServer) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let db_path = tempdir.path().join("palace.db");
+        let server = MempalMcpServer::new_with_factory(
+            db_path.clone(),
+            Arc::new(StubEmbedderFactory {
+                vector: vec![0.1, 0.2, 0.3],
+            }),
+        );
+        (tempdir, db_path, server)
+    }
+
+    fn insert_drawer(
+        db_path: &Path,
+        id: &str,
+        content: &str,
+        wing: &str,
+        room: Option<&str>,
+        source_file: &str,
+        importance: i32,
+    ) {
+        let db = Database::open(db_path).expect("open db");
+        db.insert_drawer(&Drawer {
+            id: id.to_string(),
+            content: content.to_string(),
+            wing: wing.to_string(),
+            room: room.map(str::to_string),
+            source_file: Some(source_file.to_string()),
+            source_type: SourceType::Manual,
+            added_at: "1713000000".to_string(),
+            chunk_index: Some(0),
+            importance,
+        })
+        .expect("insert drawer");
+        db.insert_vector(id, &[0.1, 0.2, 0.3])
+            .expect("insert vector");
+    }
+
+    async fn run_search(
+        server: &MempalMcpServer,
+        query: &str,
+        wing: Option<&str>,
+        room: Option<&str>,
+        top_k: usize,
+    ) -> SearchResponse {
+        server
+            .mempal_search(Parameters(SearchRequest {
+                query: query.to_string(),
+                wing: wing.map(str::to_string),
+                room: room.map(str::to_string),
+                top_k: Some(top_k),
+            }))
+            .await
+            .expect("search should succeed")
+            .0
+    }
+
+    #[tokio::test]
+    async fn test_mempal_search_includes_structured_signals_and_preserves_raw_fields() {
+        let (_tempdir, db_path, server) = setup_server();
+        insert_drawer(
+            &db_path,
+            "drawer-1",
+            "We decided to use Arc<Mutex<>> for state because shared ownership mattered",
+            "mempal",
+            Some("signals"),
+            "/tmp/decision.md",
+            4,
+        );
+        insert_drawer(
+            &db_path,
+            "drawer-2",
+            "上海决定采用共享内存同步机制解决状态漂移问题",
+            "mempal",
+            Some("signals"),
+            "/tmp/cjk.md",
+            3,
+        );
+
+        let response = run_search(&server, "state", None, None, 2).await;
+
+        assert_eq!(response.results.len(), 2);
+
+        let decision = response
+            .results
+            .iter()
+            .find(|result| result.drawer_id == "drawer-1")
+            .expect("decision result");
+        assert_eq!(
+            decision.content,
+            "We decided to use Arc<Mutex<>> for state because shared ownership mattered"
+        );
+        assert_eq!(decision.source_file, "/tmp/decision.md");
+        assert!(decision.flags.contains(&"DECISION".to_string()));
+        assert!(!decision.entities.is_empty());
+        assert!(!decision.emotions.is_empty());
+        assert!(decision.importance_stars >= 2);
+
+        let cjk = response
+            .results
+            .iter()
+            .find(|result| result.drawer_id == "drawer-2")
+            .expect("cjk result");
+        assert_ne!(cjk.entities, vec!["UNK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_mempal_search_returns_empty_results_when_filters_exclude_all_drawers() {
+        let (_tempdir, db_path, server) = setup_server();
+        insert_drawer(
+            &db_path,
+            "drawer-1",
+            "We decided to use Arc<Mutex<>> for state because shared ownership mattered",
+            "mempal",
+            Some("signals"),
+            "/tmp/decision.md",
+            4,
+        );
+
+        let response = run_search(&server, "state", Some("other-wing"), None, 5).await;
+
+        assert!(response.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mempal_search_has_no_db_side_effects() {
+        let (_tempdir, db_path, server) = setup_server();
+        insert_drawer(
+            &db_path,
+            "drawer-1",
+            "We decided to use Arc<Mutex<>> for state because shared ownership mattered",
+            "mempal",
+            Some("signals"),
+            "/tmp/decision.md",
+            4,
+        );
+
+        let db = Database::open(&db_path).expect("open db");
+        let baseline_drawers = db.drawer_count().expect("drawer count");
+        let baseline_triples = db.triple_count().expect("triple count");
+        let baseline_schema = db.schema_version().expect("schema version");
+
+        for _ in 0..3 {
+            let response = run_search(&server, "state", None, None, 5).await;
+            assert!(!response.results.is_empty());
+        }
+
+        let db = Database::open(&db_path).expect("reopen db");
+        assert_eq!(db.drawer_count().expect("drawer count"), baseline_drawers);
+        assert_eq!(db.triple_count().expect("triple count"), baseline_triples);
+        assert_eq!(
+            db.schema_version().expect("schema version"),
+            baseline_schema
+        );
     }
 }
