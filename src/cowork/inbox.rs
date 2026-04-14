@@ -171,6 +171,51 @@ pub fn push(
     Ok((path, size))
 }
 
+/// Drain all messages from this (target, project_identity) inbox.
+///
+/// **At-most-once, winner-takes-all.** Two concurrent drain calls race on
+/// `fs::rename(path → path.draining)`. POSIX guarantees this rename is atomic:
+/// exactly one caller wins and proceeds to read+delete; the loser sees
+/// `ErrorKind::NotFound` and returns an empty Vec. **Crash window**: a winner
+/// crashing after rename but before delete leaves an orphaned `.draining`
+/// file whose content is lost. This is an accepted tradeoff; P8 does not
+/// implement crash recovery.
+pub fn drain(
+    mempal_home: &Path,
+    target: Tool,
+    cwd: &Path,
+) -> Result<Vec<InboxMessage>, InboxError> {
+    use std::fs;
+
+    let path = inbox_path(mempal_home, target, cwd)?;
+    let draining = path.with_extension("draining");
+
+    match fs::rename(&path, &draining) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    let content = fs::read_to_string(&draining)?;
+    let mut messages = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Skip malformed lines rather than failing the whole drain.
+        if let Ok(msg) = serde_json::from_str::<InboxMessage>(trimmed) {
+            messages.push(msg);
+        }
+    }
+
+    // Best-effort cleanup; content is already in `messages`.
+    let _ = fs::remove_file(&draining);
+    Ok(messages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +554,134 @@ mod tests {
 
         let after_rejected = fs::metadata(&inbox).unwrap().len();
         assert_eq!(after_rejected, MAX_TOTAL_INBOX_BYTES);
+    }
+
+    #[test]
+    fn drain_round_trip_preserves_content_bytes() {
+        let tmp_home = TempDir::new().unwrap();
+        let (_t, repo) = tmpdir_with_git();
+        let content = "hello from claude, P8 test #1".to_string();
+        push(
+            tmp_home.path(),
+            Tool::Claude,
+            Tool::Codex,
+            &repo,
+            content.clone(),
+            rfc3339(),
+        )
+        .unwrap();
+
+        let messages = drain(tmp_home.path(), Tool::Codex, &repo).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, content);
+        assert_eq!(messages[0].from, "claude");
+    }
+
+    #[test]
+    fn drain_preserves_unicode_bytes_round_trip() {
+        let tmp_home = TempDir::new().unwrap();
+        let (_t, repo) = tmpdir_with_git();
+        let content = "决策：采用 Arc<Mutex<>> 🔒 because 'shared ownership' 需要".to_string();
+        push(
+            tmp_home.path(),
+            Tool::Claude,
+            Tool::Codex,
+            &repo,
+            content.clone(),
+            rfc3339(),
+        )
+        .unwrap();
+
+        let messages = drain(tmp_home.path(), Tool::Codex, &repo).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, content);
+    }
+
+    #[test]
+    fn drain_empty_inbox_returns_empty_vec() {
+        let tmp_home = TempDir::new().unwrap();
+        let (_t, repo) = tmpdir_with_git();
+        let messages = drain(tmp_home.path(), Tool::Claude, &repo).unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn drain_nonexistent_inbox_dir_returns_empty_vec() {
+        let tmp_home = TempDir::new().unwrap();
+        let (_t, repo) = tmpdir_with_git();
+        let messages = drain(tmp_home.path(), Tool::Codex, &repo).unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn drain_preserves_fifo_order() {
+        let tmp_home = TempDir::new().unwrap();
+        let (_t, repo) = tmpdir_with_git();
+        for i in 0..3 {
+            push(
+                tmp_home.path(),
+                Tool::Claude,
+                Tool::Codex,
+                &repo,
+                format!("message-{i}"),
+                rfc3339(),
+            )
+            .unwrap();
+        }
+
+        let messages = drain(tmp_home.path(), Tool::Codex, &repo).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].content, "message-0");
+        assert_eq!(messages[1].content, "message-1");
+        assert_eq!(messages[2].content, "message-2");
+    }
+
+    #[test]
+    fn drain_is_one_shot_file_disappears() {
+        let tmp_home = TempDir::new().unwrap();
+        let (_t, repo) = tmpdir_with_git();
+        push(
+            tmp_home.path(),
+            Tool::Claude,
+            Tool::Codex,
+            &repo,
+            "one".into(),
+            rfc3339(),
+        )
+        .unwrap();
+
+        let first = drain(tmp_home.path(), Tool::Codex, &repo).unwrap();
+        assert_eq!(first.len(), 1);
+
+        let second = drain(tmp_home.path(), Tool::Codex, &repo).unwrap();
+        assert!(second.is_empty());
+
+        let path = inbox_path(tmp_home.path(), Tool::Codex, &repo).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn drain_is_isolated_per_distinct_project() {
+        let tmp_home = TempDir::new().unwrap();
+        let proj_a = tmp_home.path().join("alpha");
+        let proj_b = tmp_home.path().join("beta");
+        fs::create_dir_all(proj_a.join(".git")).unwrap();
+        fs::create_dir_all(proj_b.join(".git")).unwrap();
+
+        push(
+            tmp_home.path(),
+            Tool::Claude,
+            Tool::Codex,
+            &proj_a,
+            "for alpha".into(),
+            rfc3339(),
+        )
+        .unwrap();
+
+        let drained = drain(tmp_home.path(), Tool::Codex, &proj_b).unwrap();
+        assert!(drained.is_empty(), "proj-b drain must not see proj-a messages");
+
+        let path_a = inbox_path(tmp_home.path(), Tool::Codex, &proj_a).unwrap();
+        assert!(path_a.exists(), "proj-a inbox still present");
     }
 }
