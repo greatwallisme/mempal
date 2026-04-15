@@ -87,6 +87,33 @@ You have persistent project memory via mempal. Follow these rules in every sessi
    re-peeking. Cite the partner session file path in source_file alongside
    your own citation.
 
+10. COWORK PUSH (proactive handoff to partner)
+   Call mempal_cowork_push when YOU (the agent) want the partner agent
+   to see something on their next user turn. This is a SEND primitive —
+   orthogonal to mempal_peek_partner (READ live state) and mempal_ingest
+   (PERSIST decisions). Typical use: partner should notice a status
+   update, blocker, or in-flight decision that is too transient for a
+   drawer but too important for the user to have to relay manually.
+
+   Delivery semantics: at-next-UserPromptSubmit, NOT real-time. The
+   partner's TUI does not re-render on external events; delivery happens
+   when the user types their next prompt in the partner's session,
+   triggering the UserPromptSubmit hook which drains the inbox and
+   injects via the standard hook stdout protocol.
+
+   Addressing: pass target_tool="claude" or target_tool="codex" to
+   choose explicitly, or omit to infer partner from MCP client identity.
+   Self-push (target == you) is rejected.
+
+   When NOT to push:
+   - Content you also want to persist → use mempal_ingest (drawers)
+   - Trigger partner mid-turn → not supported (at-next-submit only)
+   - Broadcast to multiple targets → one target per push
+   - Rich content / file attachments → only plain text body (≤ 8 KB)
+
+   On InboxFull error: STOP pushing and wait for partner to drain. Do
+   NOT retry — that would just fail again.
+
 TOOLS:
   mempal_status        — current state + this protocol + AAAK format spec
   mempal_search        — semantic search with wing/room filters, citation-bearing
@@ -96,6 +123,7 @@ TOOLS:
   mempal_kg            — knowledge graph: add/query/invalidate/timeline/stats triples
   mempal_tunnels       — discover cross-wing room links
   mempal_peek_partner  — read partner agent's live session (Claude ↔ Codex), pure read
+  mempal_cowork_push   — send a short handoff message to partner agent (P8)
 
 Key invariant: mempal stores raw text verbatim. Every search result can be
 traced back to a source_file. If you cannot cite the source, you are guessing."#;
@@ -128,6 +156,22 @@ mod tests {
         assert!(
             MEMORY_PROTOCOL.contains("mempal_peek_partner"),
             "MEMORY_PROTOCOL must mention the mempal_peek_partner tool"
+        );
+    }
+
+    #[test]
+    fn contains_rule_10_cowork_push() {
+        assert!(
+            MEMORY_PROTOCOL.contains("10. COWORK PUSH"),
+            "MEMORY_PROTOCOL must include Rule 10 COWORK PUSH"
+        );
+    }
+
+    #[test]
+    fn contains_cowork_push_tool_name() {
+        assert!(
+            MEMORY_PROTOCOL.contains("mempal_cowork_push"),
+            "MEMORY_PROTOCOL must mention mempal_cowork_push in TOOLS list"
         );
     }
 }
