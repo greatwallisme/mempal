@@ -478,7 +478,7 @@ impl MempalMcpServer {
             })?;
 
         let target = match request.target_tool.as_deref() {
-            Some(name) => Tool::from_str_ci(name).ok_or_else(|| {
+            Some(name) => Tool::from_target_str(name).ok_or_else(|| {
                 ErrorData::invalid_params(
                     format!("unknown target_tool `{name}`: expected claude|codex"),
                     None,
@@ -962,5 +962,44 @@ mod tests {
 
         let messages = crate::cowork::inbox::drain(&mempal_home, Tool::Codex, &repo).unwrap();
         assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_push_rejects_explicit_auto_target() {
+        // Guard for Codex review finding 1: `target_tool="auto"` must NOT
+        // be accepted as an explicit target. Per spec lines 37/39 target is
+        // limited to claude|codex. Previously `Tool::from_str_ci` let "auto"
+        // through, which would silently write to an orphan
+        // ~/.mempal/cowork-inbox/auto/*.jsonl that no partner drains.
+        let (tempdir, _db_path, server) = setup_server();
+        let (mempal_home, repo, _guard) = setup_cowork_home(&tempdir).await;
+
+        *server.client_name.lock().unwrap() = Some("claude-code".to_string());
+
+        for bad in ["auto", "AUTO", "Auto"] {
+            let err = match server
+                .mempal_cowork_push(Parameters(CoworkPushRequest {
+                    content: "should not land".into(),
+                    target_tool: Some(bad.to_string()),
+                    cwd: repo.to_string_lossy().into_owned(),
+                }))
+                .await
+            {
+                Err(e) => e,
+                Ok(_) => panic!("target_tool={bad:?} must be rejected"),
+            };
+            assert!(
+                err.to_string().contains("expected claude|codex"),
+                "error for target_tool={bad:?} should mention expected targets, got: {err}"
+            );
+        }
+
+        // And ensure nothing was written to the orphan `auto/` inbox dir.
+        let auto_inbox_dir = mempal_home.join("cowork-inbox").join("auto");
+        assert!(
+            !auto_inbox_dir.exists(),
+            "rejected push must not create orphan auto/ inbox dir at {}",
+            auto_inbox_dir.display()
+        );
     }
 }

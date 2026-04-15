@@ -1033,7 +1033,7 @@ fn cowork_drain_command(
     use mempal::cowork::inbox;
 
     let inner: Result<(), Box<dyn std::error::Error>> = (|| {
-        let target_tool = Tool::from_str_ci(&target)
+        let target_tool = Tool::from_target_str(&target)
             .ok_or_else(|| format!("invalid target `{target}`: expected claude|codex"))?;
         let mempal_home = inbox::mempal_home();
 
@@ -1180,42 +1180,75 @@ mempal cowork-drain --target claude --cwd "${CLAUDE_PROJECT_CWD:-$PWD}" 2>/dev/n
                 .as_array_mut()
                 .ok_or("UserPromptSubmit is not array")?;
 
-            // Idempotency check: scan existing entries to see if any inner
-            // `hooks[]` array already contains a command that looks like a
-            // mempal cowork-drain invocation. Running install-hooks N times
-            // must NOT produce N identical drain handlers.
-            let already_installed = event_arr.iter().any(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|arr| {
-                        arr.iter().any(|handler| {
-                            handler
-                                .get("command")
-                                .and_then(|c| c.as_str())
-                                .map(|cmd| cmd.contains("mempal cowork-drain"))
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            });
+            // Exact-match idempotency + self-healing: spec line 48 pins the
+            // canonical command. Scan for any entry whose nested hooks
+            // contain a `mempal cowork-drain` command. Classify each match as
+            // either (a) exact-match of CANONICAL, or (b) stale/wrong drain
+            // entry that must be replaced. Unrelated entries (non-drain
+            // commands) are preserved untouched.
+            //
+            // Outcomes:
+            //  - exactly one canonical entry AND no stale entries → no-op
+            //  - any stale entry present OR canonical missing → remove every
+            //    mempal-drain entry and re-append canonical
+            //
+            // This way a user re-running install-hooks after upgrading mempal
+            // (where the command flags changed) gets their stale hook healed
+            // instead of silently left broken by a loose substring match.
+            const CANONICAL_CODEX_CMD: &str = "mempal cowork-drain --target codex --format codex-hook-json --cwd-source stdin-json";
 
-            if already_installed {
+            let entry_has_drain_command = |entry: &serde_json::Value| -> Option<bool> {
+                // Returns Some(true) for exact canonical, Some(false) for
+                // stale drain, None for unrelated.
+                let hooks = entry.get("hooks")?.as_array()?;
+                for handler in hooks {
+                    let cmd = handler.get("command")?.as_str()?;
+                    if cmd == CANONICAL_CODEX_CMD {
+                        return Some(true);
+                    }
+                    if cmd.contains("mempal cowork-drain") {
+                        return Some(false);
+                    }
+                }
+                None
+            };
+
+            let mut canonical_count = 0usize;
+            let mut has_stale = false;
+            for entry in event_arr.iter() {
+                match entry_has_drain_command(entry) {
+                    Some(true) => canonical_count += 1,
+                    Some(false) => has_stale = true,
+                    None => {}
+                }
+            }
+
+            let needs_rewrite = has_stale || canonical_count != 1;
+
+            if !needs_rewrite {
                 println!(
                     "= Codex hook already installed in {} (no-op)",
                     hooks_path.display()
                 );
             } else {
+                event_arr.retain(|entry| entry_has_drain_command(entry).is_none());
                 event_arr.push(serde_json::json!({
                     "hooks": [{
                         "type": "command",
-                        "command": "mempal cowork-drain --target codex --format codex-hook-json --cwd-source stdin-json",
+                        "command": CANONICAL_CODEX_CMD,
                         "statusMessage": "mempal cowork drain"
                     }]
                 }));
 
                 std::fs::write(&hooks_path, serde_json::to_string_pretty(&root)?)?;
-                println!("✓ merged Codex hook into {}", hooks_path.display());
+                if has_stale {
+                    println!(
+                        "✓ healed stale Codex drain hook in {}",
+                        hooks_path.display()
+                    );
+                } else {
+                    println!("✓ merged Codex hook into {}", hooks_path.display());
+                }
             }
         }
 

@@ -19,12 +19,31 @@ pub enum Tool {
 
 impl Tool {
     /// Case-insensitive parse from a string; used for ClientInfo.name matching.
+    ///
+    /// Accepts `"auto"` for peek's auto-inference mode. **Do not use this for
+    /// cowork push/drain target parsing** — those paths require a concrete
+    /// `claude|codex` and must reject `"auto"`. Use `from_target_str` instead.
     pub fn from_str_ci(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" | "claude_code" => Some(Tool::Claude),
             "codex" | "codex-cli" | "codex_cli" | "codex-tui" => Some(Tool::Codex),
             "auto" => Some(Tool::Auto),
             _ => None,
+        }
+    }
+
+    /// Strict parser for cowork push/drain **explicit target_tool** values.
+    ///
+    /// Rejects `"auto"` and anything else that is not a concrete agent. This
+    /// is the guard that keeps a `target_tool="auto"` push from silently
+    /// writing to an orphan `~/.mempal/cowork-inbox/auto/…` file that no
+    /// partner will ever drain. Per spec
+    /// `specs/p8-cowork-inbox-push.spec.md:37,39` target is limited to
+    /// `claude|codex`.
+    pub fn from_target_str(s: &str) -> Option<Self> {
+        match Self::from_str_ci(s) {
+            Some(Tool::Auto) => None,
+            other => other,
         }
     }
 
@@ -372,6 +391,27 @@ mod tests {
         assert_eq!(Tool::from_str_ci("claude-code"), Some(Tool::Claude));
         assert_eq!(Tool::from_str_ci("codex-cli"), Some(Tool::Codex));
         assert_eq!(Tool::from_str_ci("codex-tui"), Some(Tool::Codex));
+    }
+
+    #[test]
+    fn from_target_str_rejects_auto_and_unknown() {
+        // Concrete targets accepted, with case-insensitive and compound-name
+        // handling inherited from `from_str_ci`.
+        assert_eq!(Tool::from_target_str("claude"), Some(Tool::Claude));
+        assert_eq!(Tool::from_target_str("CODEX"), Some(Tool::Codex));
+        assert_eq!(Tool::from_target_str("claude-code"), Some(Tool::Claude));
+        assert_eq!(Tool::from_target_str("codex-tui"), Some(Tool::Codex));
+
+        // "auto" is the key rejection case — explicit target must be a
+        // concrete agent, otherwise a push would land in an orphan
+        // ~/.mempal/cowork-inbox/auto/*.jsonl file that nothing drains.
+        assert_eq!(Tool::from_target_str("auto"), None);
+        assert_eq!(Tool::from_target_str("AUTO"), None);
+        assert_eq!(Tool::from_target_str("Auto"), None);
+
+        // Unknown garbage still rejected.
+        assert_eq!(Tool::from_target_str("bogus"), None);
+        assert_eq!(Tool::from_target_str(""), None);
     }
 
     #[test]

@@ -131,6 +131,33 @@ async fn push_and_drain_have_no_palace_db_side_effects() {
 }
 
 #[test]
+fn cowork_drain_cli_rejects_auto_target() {
+    // Guard for Codex review finding 1: `mempal cowork-drain --target auto`
+    // used to parse via `Tool::from_str_ci` which silently accepted "auto".
+    // Spec line 39 limits target to `claude|codex`. CLI still exits 0 per
+    // graceful-degrade contract (stdout empty, error → stderr).
+    let tmp = TempDir::new().unwrap();
+    let output = Command::new(mempal_bin())
+        .args(["cowork-drain", "--target", "auto", "--cwd", "/tmp/whatever"])
+        .env("HOME", tmp.path())
+        .output()
+        .expect("spawn");
+
+    // Graceful degrade: exit 0, stdout empty, error on stderr.
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must stay empty on invalid target, got {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid target") && stderr.contains("expected claude|codex"),
+        "stderr should reject `auto`, got: {stderr}"
+    );
+}
+
+#[test]
 fn cowork_drain_cli_graceful_degrade_when_mempal_home_missing() {
     let tmp = TempDir::new().unwrap();
     // HOME points to an empty dir with NO .mempal/ subdirectory.
@@ -442,5 +469,117 @@ fn cowork_install_hooks_is_idempotent_for_global_codex() {
         mempal_entries, 1,
         "install-hooks must be idempotent; expected exactly 1 mempal drain \
          entry after 3 invocations, got {mempal_entries}"
+    );
+}
+
+#[test]
+fn cowork_install_hooks_heals_stale_codex_drain_entry() {
+    // Guard for Codex review finding 2: the earlier idempotency fix used a
+    // loose substring match, so a pre-existing stale `mempal cowork-drain`
+    // handler (wrong target/format, old flag set from a previous mempal
+    // version) would be silently left in place — re-install would no-op
+    // instead of self-healing. Spec line 48 pins the canonical command.
+    //
+    // This test seeds ~/.codex/hooks.json with a stale entry, runs
+    // install-hooks --global-codex, and asserts the final state has
+    // exactly one mempal drain entry and it equals the pinned canonical
+    // command.
+    let tmp = TempDir::new().unwrap();
+    let fake_home = tmp.path().join("home");
+    fs::create_dir_all(fake_home.join(".codex")).unwrap();
+    let proj = tmp.path().join("proj");
+    fs::create_dir_all(&proj).unwrap();
+
+    // Seed a hooks.json where the existing mempal-drain handler has wrong
+    // flags (missing --cwd-source, wrong format) — this is what a user
+    // with an older mempal would have.
+    let seed = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [{
+                        "type": "command",
+                        "command": "mempal cowork-drain --target codex --format plain",
+                        "statusMessage": "stale mempal"
+                    }]
+                },
+                {
+                    // An unrelated hook that must survive untouched.
+                    "hooks": [{
+                        "type": "command",
+                        "command": "echo unrelated",
+                        "statusMessage": "unrelated"
+                    }]
+                }
+            ]
+        }
+    });
+    let hooks_path = fake_home.join(".codex/hooks.json");
+    fs::write(&hooks_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+    let output = Command::new(mempal_bin())
+        .args(["cowork-install-hooks", "--global-codex"])
+        .current_dir(&proj)
+        .env("HOME", &fake_home)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = fs::read_to_string(&hooks_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let arr = parsed["hooks"]["UserPromptSubmit"].as_array().unwrap();
+
+    let canonical =
+        "mempal cowork-drain --target codex --format codex-hook-json --cwd-source stdin-json";
+
+    // Collect all drain-related commands still present.
+    let drain_cmds: Vec<&str> = arr
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|inner| inner.iter())
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|h| h.get("command").and_then(|c| c.as_str()))
+        .filter(|c| c.contains("mempal cowork-drain"))
+        .collect();
+
+    assert_eq!(
+        drain_cmds.len(),
+        1,
+        "expected exactly 1 mempal drain entry after self-heal, got {drain_cmds:?}"
+    );
+    assert_eq!(
+        drain_cmds[0], canonical,
+        "stale entry must be replaced by canonical command"
+    );
+
+    // Unrelated hook must survive — install-hooks must only touch mempal
+    // drain entries, not wipe the whole UserPromptSubmit array.
+    let survived_unrelated = arr.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|inner| {
+                inner.iter().any(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|cmd| cmd == "echo unrelated")
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    });
+    assert!(
+        survived_unrelated,
+        "unrelated UserPromptSubmit hook must be preserved"
     );
 }
