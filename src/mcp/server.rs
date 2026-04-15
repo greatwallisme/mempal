@@ -466,11 +466,7 @@ impl MempalMcpServer {
         &self,
         Parameters(request): Parameters<CoworkPushRequest>,
     ) -> std::result::Result<Json<CoworkPushResponse>, ErrorData> {
-        let caller_name = self
-            .client_name
-            .lock()
-            .ok()
-            .and_then(|g| g.clone());
+        let caller_name = self.client_name.lock().ok().and_then(|g| g.clone());
         let caller_tool = caller_name
             .as_deref()
             .and_then(Tool::from_str_ci)
@@ -489,10 +485,7 @@ impl MempalMcpServer {
                 )
             })?,
             None => caller_tool.partner().ok_or_else(|| {
-                ErrorData::invalid_params(
-                    "caller tool has no partner (tool=auto or unknown)",
-                    None,
-                )
+                ErrorData::invalid_params("caller tool has no partner (tool=auto or unknown)", None)
             })?,
         };
 
@@ -540,9 +533,7 @@ fn current_rfc3339() -> String {
     // Use the existing format_rfc3339 via SystemTime conversion.
     let secs = now;
     // Reuse cowork::peek::format_rfc3339 is pub; call it to stay consistent.
-    crate::cowork::peek::format_rfc3339(
-        UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
-    )
+    crate::cowork::peek::format_rfc3339(UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -835,21 +826,23 @@ mod tests {
     // which only cover the CLI and inbox layers.
 
     use super::super::tools::CoworkPushRequest;
-    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Mutex as TokioMutex;
 
     // Tests below mutate $HOME env var to point mempal_home() at a tempdir.
     // Rust's default test runner runs tests in parallel threads, so they
     // would race on shared process state. Serialize them behind a process-
-    // wide Mutex. Every cowork push handler test must lock this for its
-    // entire lifetime.
-    static COWORK_HOME_LOCK: StdMutex<()> = StdMutex::new(());
+    // wide async Mutex whose guard CAN be held across .await points
+    // (unlike std::sync::Mutex, which clippy rejects with await_holding_lock).
+    // Every cowork push handler test must acquire this guard before
+    // mutating $HOME and hold it for its entire lifetime.
+    static COWORK_HOME_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
-    fn setup_cowork_home(
+    async fn setup_cowork_home(
         tempdir: &TempDir,
-    ) -> (PathBuf, PathBuf, std::sync::MutexGuard<'static, ()>) {
+    ) -> (PathBuf, PathBuf, tokio::sync::MutexGuard<'static, ()>) {
         // Lock FIRST before touching $HOME so no other parallel cowork
         // test can observe a half-written env var.
-        let guard = COWORK_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = COWORK_HOME_LOCK.lock().await;
         let home = tempdir.path().to_path_buf();
         let mempal_home = home.join(".mempal");
         let repo = home.join("proj");
@@ -863,7 +856,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_push_without_client_info_rejects_auto_target() {
         let (tempdir, _db_path, server) = setup_server();
-        let (_mempal_home, repo, _guard) = setup_cowork_home(&tempdir);
+        let (_mempal_home, repo, _guard) = setup_cowork_home(&tempdir).await;
 
         // client_name is None because we never called initialize().
         // Pushing without an explicit target must fail with "cannot infer".
@@ -889,7 +882,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_push_succeeds_with_captured_client_name_and_auto_target() {
         let (tempdir, _db_path, server) = setup_server();
-        let (mempal_home, repo, _guard) = setup_cowork_home(&tempdir);
+        let (mempal_home, repo, _guard) = setup_cowork_home(&tempdir).await;
 
         // Simulate a completed `initialize` handshake: caller identified
         // as "claude-code" (Claude Code's standard MCP client name).
@@ -921,7 +914,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_push_self_push_rejected_via_inbox_error_mapping() {
         let (tempdir, _db_path, server) = setup_server();
-        let (_mempal_home, repo, _guard) = setup_cowork_home(&tempdir);
+        let (_mempal_home, repo, _guard) = setup_cowork_home(&tempdir).await;
 
         // Caller is Codex, target explicitly Codex → SelfPush error from
         // inbox::push. Handler must map it to InvalidParams MCP error.
@@ -948,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_push_explicit_target_overrides_auto_inference() {
         let (tempdir, _db_path, server) = setup_server();
-        let (mempal_home, repo, _guard) = setup_cowork_home(&tempdir);
+        let (mempal_home, repo, _guard) = setup_cowork_home(&tempdir).await;
 
         *server.client_name.lock().unwrap() = Some("claude-code".to_string());
 

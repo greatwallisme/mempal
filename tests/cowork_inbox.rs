@@ -50,10 +50,8 @@ async fn concurrent_drain_is_winner_takes_all_at_most_once() {
     let home_b = Arc::clone(&mempal_home);
     let repo_b = Arc::clone(&repo_arc);
 
-    let task_a =
-        tokio::task::spawn_blocking(move || drain(&home_a, Tool::Codex, &repo_a).unwrap());
-    let task_b =
-        tokio::task::spawn_blocking(move || drain(&home_b, Tool::Codex, &repo_b).unwrap());
+    let task_a = tokio::task::spawn_blocking(move || drain(&home_a, Tool::Codex, &repo_a).unwrap());
+    let task_b = tokio::task::spawn_blocking(move || drain(&home_b, Tool::Codex, &repo_b).unwrap());
 
     let (a, b) = tokio::join!(task_a, task_b);
     let a_msgs: Vec<InboxMessage> = a.unwrap();
@@ -225,7 +223,7 @@ fn cowork_drain_stdin_json_malformed_payload_graceful_degrade() {
     let bad_inputs = [
         "not json at all".to_string(),
         r#"{"session_id":"s","prompt":"继续"}"#.to_string(), // missing cwd
-        r#"{"cwd":42}"#.to_string(),                          // wrong type
+        r#"{"cwd":42}"#.to_string(),                         // wrong type
     ];
     for payload in &bad_inputs {
         let mut child = Command::new(mempal_bin())
@@ -372,11 +370,10 @@ fn cowork_install_hooks_writes_correct_codex_hooks_json_shape() {
     assert!(parsed["hooks"].is_object());
     assert!(parsed["hooks"]["UserPromptSubmit"].is_array());
     assert!(
-        parsed["hooks"]["UserPromptSubmit"]
+        !parsed["hooks"]["UserPromptSubmit"]
             .as_array()
             .unwrap()
-            .len()
-            >= 1
+            .is_empty()
     );
 
     let entry = &parsed["hooks"]["UserPromptSubmit"][0];

@@ -91,11 +91,7 @@ pub fn encode_project_identity(identity: &Path) -> Result<String, InboxError> {
 }
 
 /// Return `<mempal_home>/cowork-inbox/<target>/<encoded_project_identity>.jsonl`.
-pub fn inbox_path(
-    mempal_home: &Path,
-    target: Tool,
-    cwd: &Path,
-) -> Result<PathBuf, InboxError> {
+pub fn inbox_path(mempal_home: &Path, target: Tool, cwd: &Path) -> Result<PathBuf, InboxError> {
     let identity = project_identity(cwd);
     let encoded = encode_project_identity(&identity)?;
     Ok(mempal_home
@@ -236,10 +232,7 @@ pub fn format_plain(from: Tool, messages: &[InboxMessage]) -> String {
 
 /// Format drained messages as Codex native hook JSON envelope.
 /// Returns empty string when no messages.
-pub fn format_codex_hook_json(
-    from: Tool,
-    messages: &[InboxMessage],
-) -> Result<String, InboxError> {
+pub fn format_codex_hook_json(from: Tool, messages: &[InboxMessage]) -> Result<String, InboxError> {
     if messages.is_empty() {
         return Ok(String::new());
     }
@@ -294,10 +287,8 @@ mod tests {
 
     #[test]
     fn encode_project_identity_replaces_slashes_with_dashes() {
-        let encoded = encode_project_identity(
-            Path::new("/Users/zhangalex/Work/Projects/AI/mempal"),
-        )
-        .unwrap();
+        let encoded =
+            encode_project_identity(Path::new("/Users/zhangalex/Work/Projects/AI/mempal")).unwrap();
         assert_eq!(encoded, "-Users-zhangalex-Work-Projects-AI-mempal");
     }
 
@@ -412,7 +403,10 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             err,
-            InboxError::InboxFull { current_count: 16, .. }
+            InboxError::InboxFull {
+                current_count: 16,
+                ..
+            }
         ));
     }
 
@@ -458,8 +452,14 @@ mod tests {
             .lines()
             .filter(|l| !l.trim().is_empty())
             .count();
-        assert_eq!(current_bytes, TARGET_BYTES, "precondition: current_bytes == 32700");
-        assert_eq!(current_count, TARGET_COUNT, "precondition: current_count == 10");
+        assert_eq!(
+            current_bytes, TARGET_BYTES,
+            "precondition: current_bytes == 32700"
+        );
+        assert_eq!(
+            current_count, TARGET_COUNT,
+            "precondition: current_count == 10"
+        );
 
         let would_cross = "y".repeat(200);
         let err = push(
@@ -518,8 +518,10 @@ mod tests {
             } else {
                 0
             };
-            let remaining_after_maybe_seed =
-                MAX_TOTAL_INBOX_BYTES - current - probe_empty_line_bytes - (seed_content_len as u64);
+            let remaining_after_maybe_seed = MAX_TOTAL_INBOX_BYTES
+                - current
+                - probe_empty_line_bytes
+                - (seed_content_len as u64);
             // If pushing another seed would leave remaining <= MAX_MESSAGE_SIZE
             // + overhead, we're ready for the final exact push. Stop seeding.
             if remaining_after_maybe_seed < (MAX_MESSAGE_SIZE as u64) {
@@ -716,7 +718,10 @@ mod tests {
         .unwrap();
 
         let drained = drain(tmp_home.path(), Tool::Codex, &proj_b).unwrap();
-        assert!(drained.is_empty(), "proj-b drain must not see proj-a messages");
+        assert!(
+            drained.is_empty(),
+            "proj-b drain must not see proj-a messages"
+        );
 
         let path_a = inbox_path(tmp_home.path(), Tool::Codex, &proj_a).unwrap();
         assert!(path_a.exists(), "proj-a inbox still present");

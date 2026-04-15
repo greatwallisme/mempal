@@ -1141,7 +1141,10 @@ mempal cowork-drain --target claude --cwd "${CLAUDE_PROJECT_CWD:-$PWD}" 2>/dev/n
             perms.set_mode(0o755);
             std::fs::set_permissions(&claude_script, perms)?;
         }
-        println!("✓ installed Claude Code hook at {}", claude_script.display());
+        println!(
+            "✓ installed Claude Code hook at {}",
+            claude_script.display()
+        );
 
         if global_codex {
             // Do NOT introduce `dirs` crate — use env::var_os("HOME") directly.
