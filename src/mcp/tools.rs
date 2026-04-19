@@ -98,6 +98,11 @@ pub struct IngestResponse {
     pub drawer_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duplicate_warning: Option<DuplicateWarning>,
+    /// Milliseconds spent waiting for the per-source ingest lock (P9-B).
+    /// Omitted in dry-run and when lock was not acquired. When > 0, a
+    /// concurrent ingest of the same content serialized with this call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -275,6 +280,27 @@ pub struct CoworkPushResponse {
     pub inbox_path: String,
     pub pushed_at: String,
     pub inbox_size_after: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FactCheckRequest {
+    /// Text to check for contradictions against KG triples + known entities.
+    pub text: String,
+    /// Optional wing filter for known-entity scope. OMIT unless you have
+    /// already seen the exact wing name via mempal_status.
+    pub wing: Option<String>,
+    /// Optional room filter within a wing. OMIT unless explicitly named.
+    pub room: Option<String>,
+    /// Optional RFC3339 timestamp for the `now` cutoff used by
+    /// StaleFact detection. OMIT to use current UTC time.
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FactCheckResponse {
+    pub issues: Vec<crate::factcheck::FactIssue>,
+    pub checked_entities: Vec<String>,
+    pub kg_triples_scanned: usize,
 }
 
 impl SearchResultDto {

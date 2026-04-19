@@ -95,6 +95,22 @@ enum Commands {
         mcp: bool,
     },
     Status,
+    /// Run offline contradiction check on text against KG triples +
+    /// known-entity registry. Pure read, no LLM, no network.
+    FactCheck {
+        /// File path or `-` for stdin. Omit for stdin.
+        path: Option<PathBuf>,
+        /// Optional wing filter for known-entity scope.
+        #[arg(long)]
+        wing: Option<String>,
+        /// Optional room filter within the wing.
+        #[arg(long)]
+        room: Option<String>,
+        /// RFC3339 timestamp for the `now` cutoff (stale-fact detection).
+        /// Defaults to the current UTC time.
+        #[arg(long)]
+        now: Option<String>,
+    },
     /// Drain cowork inbox messages for the given target. Always exits 0
     /// (hook graceful degrade). Intended to be called from a UserPromptSubmit
     /// hook on each user turn — never blocks the user's prompt.
@@ -267,6 +283,12 @@ async fn run() -> Result<()> {
         Commands::Taxonomy { command } => taxonomy_command(&db, command),
         Commands::Serve { mcp } => serve_command(&config, mcp).await,
         Commands::Status => status_command(&db),
+        Commands::FactCheck {
+            path,
+            wing,
+            room,
+            now,
+        } => fact_check_command(&db, path.as_deref(), wing.as_deref(), room.as_deref(), now),
         // Cowork commands were already dispatched above and returned early.
         Commands::CoworkDrain { .. }
         | Commands::CoworkStatus { .. }
@@ -886,6 +908,47 @@ fn taxonomy_edit_command(db: &Database, wing: &str, room: &str, keywords: &str) 
         entry.keywords.join(", ")
     );
 
+    Ok(())
+}
+
+fn fact_check_command(
+    db: &Database,
+    path: Option<&Path>,
+    wing: Option<&str>,
+    room: Option<&str>,
+    now: Option<String>,
+) -> Result<()> {
+    use std::io::Read;
+
+    let text = match path {
+        Some(p) if p.as_os_str() == "-" => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("failed to read stdin")?;
+            buf
+        }
+        Some(p) => {
+            std::fs::read_to_string(p).with_context(|| format!("failed to read {}", p.display()))?
+        }
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("failed to read stdin")?;
+            buf
+        }
+    };
+
+    let now_secs = mempal::factcheck::resolve_now(now.as_deref())?;
+    let scope = mempal::factcheck::validate_scope(wing, room)?;
+
+    let report =
+        mempal::factcheck::check(&text, db, now_secs, scope).context("fact check failed")?;
+
+    let json =
+        serde_json::to_string_pretty(&report).context("failed to serialize fact-check report")?;
+    println!("{json}");
     Ok(())
 }
 

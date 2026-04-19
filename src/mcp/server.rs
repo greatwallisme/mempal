@@ -19,10 +19,10 @@ use rmcp::{
 
 use super::tools::{
     CoworkPushRequest, CoworkPushResponse, DeleteRequest, DeleteResponse, DuplicateWarning,
-    IngestRequest, IngestResponse, KgRequest, KgResponse, KgStatsDto, PeekMessageDto,
-    PeekPartnerRequest, PeekPartnerResponse, ScopeCount, SearchRequest, SearchResponse,
-    SearchResultDto, StatusResponse, TaxonomyEntryDto, TaxonomyRequest, TaxonomyResponse,
-    TripleDto, TunnelDto, TunnelsResponse,
+    FactCheckRequest, FactCheckResponse, IngestRequest, IngestResponse, KgRequest, KgResponse,
+    KgStatsDto, PeekMessageDto, PeekPartnerRequest, PeekPartnerResponse, ScopeCount, SearchRequest,
+    SearchResponse, SearchResultDto, StatusResponse, TaxonomyEntryDto, TaxonomyRequest,
+    TaxonomyResponse, TripleDto, TunnelDto, TunnelsResponse,
 };
 
 #[derive(Clone)]
@@ -159,6 +159,7 @@ impl MempalMcpServer {
             return Ok(Json(IngestResponse {
                 drawer_id,
                 duplicate_warning: None,
+                lock_wait_ms: None,
             }));
         }
 
@@ -173,6 +174,23 @@ impl MempalMcpServer {
             .next()
             .ok_or_else(|| ErrorData::internal_error("embedder returned no vector", None))?;
         let db = self.open_db()?;
+
+        // P9-B: per-source ingest lock guards the dedup/insert critical
+        // section. Lock key derives from the drawer_id (content-addressed,
+        // filesystem-safe). Two concurrent mempal_ingest calls with the
+        // same content serialize here.
+        let mempal_home = db
+            .path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let lock_guard = crate::ingest::lock::acquire_source_lock(
+            &mempal_home,
+            &drawer_id,
+            std::time::Duration::from_secs(5),
+        )
+        .map_err(|e| ErrorData::internal_error(format!("ingest lock: {e}"), None))?;
+        let lock_wait_ms = Some(lock_guard.wait_duration().as_millis() as u64);
 
         // Semantic dedup check: find most similar existing drawer
         let duplicate_warning = check_semantic_duplicate(&db, &vector, &request.content);
@@ -194,9 +212,13 @@ impl MempalMcpServer {
             db.insert_vector(&drawer_id, &vector).map_err(db_error)?;
         }
 
+        // lock_guard drops here, releasing the advisory lock.
+        drop(lock_guard);
+
         Ok(Json(IngestResponse {
             drawer_id,
             duplicate_warning,
+            lock_wait_ms,
         }))
     }
 
@@ -518,6 +540,38 @@ impl MempalMcpServer {
             inbox_size_after: size,
         }))
     }
+
+    #[tool(
+        name = "mempal_fact_check",
+        description = "Detect contradictions in text against KG triples + known entities. \
+                       Returns SimilarNameConflict (similar-name typos), RelationContradiction \
+                       (incompatible predicate for same endpoints), and StaleFact (KG valid_to \
+                       expired) issues. Pure read, zero LLM, zero network, deterministic. \
+                       Call before ingesting decisions that assert relationships between named \
+                       entities to catch typos or outdated assumptions early."
+    )]
+    async fn mempal_fact_check(
+        &self,
+        Parameters(request): Parameters<FactCheckRequest>,
+    ) -> std::result::Result<Json<FactCheckResponse>, ErrorData> {
+        let db = self.open_db()?;
+        let now_secs =
+            crate::factcheck::resolve_now(request.now.as_deref()).map_err(fact_check_error)?;
+        let scope =
+            crate::factcheck::validate_scope(request.wing.as_deref(), request.room.as_deref())
+                .map_err(fact_check_error)?;
+
+        let report = tokio::task::block_in_place(|| {
+            crate::factcheck::check(&request.text, &db, now_secs, scope)
+        })
+        .map_err(fact_check_error)?;
+
+        Ok(Json(FactCheckResponse {
+            issues: report.issues,
+            checked_entities: report.checked_entities,
+            kg_triples_scanned: report.kg_triples_scanned,
+        }))
+    }
 }
 
 /// Return the current UTC timestamp in RFC 3339 format (seconds precision).
@@ -575,6 +629,18 @@ fn db_error(error: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(format!("{error}"), None)
 }
 
+fn fact_check_error(error: crate::factcheck::FactCheckError) -> ErrorData {
+    match error {
+        crate::factcheck::FactCheckError::InvalidScope(_)
+        | crate::factcheck::FactCheckError::InvalidNow(_) => {
+            ErrorData::invalid_params(error.to_string(), None)
+        }
+        crate::factcheck::FactCheckError::Db(_) => {
+            ErrorData::internal_error(format!("fact_check: {error}"), None)
+        }
+    }
+}
+
 const DEDUP_THRESHOLD: f32 = 0.85;
 
 fn check_semantic_duplicate(
@@ -620,6 +686,9 @@ fn triple_to_dto(triple: &Triple) -> TripleDto {
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use tempfile::TempDir;
@@ -636,11 +705,35 @@ mod tests {
         vector: Vec<f32>,
     }
 
+    #[derive(Clone)]
+    struct HoldEmbedderFactory {
+        vector: Vec<f32>,
+        delay: Duration,
+        entered: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    }
+
+    struct HoldEmbedder {
+        vector: Vec<f32>,
+        delay: Duration,
+        entered: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    }
+
     #[async_trait]
     impl crate::embed::EmbedderFactory for StubEmbedderFactory {
         async fn build(&self) -> crate::embed::Result<Box<dyn Embedder>> {
             Ok(Box::new(StubEmbedder {
                 vector: self.vector.clone(),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl crate::embed::EmbedderFactory for HoldEmbedderFactory {
+        async fn build(&self) -> crate::embed::Result<Box<dyn Embedder>> {
+            Ok(Box::new(HoldEmbedder {
+                vector: self.vector.clone(),
+                delay: self.delay,
+                entered: Arc::clone(&self.entered),
             }))
         }
     }
@@ -657,6 +750,27 @@ mod tests {
 
         fn name(&self) -> &str {
             "stub"
+        }
+    }
+
+    #[async_trait]
+    impl Embedder for HoldEmbedder {
+        async fn embed(&self, texts: &[&str]) -> crate::embed::Result<Vec<Vec<f32>>> {
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            Ok(texts.iter().map(|_| self.vector.clone()).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.vector.len()
+        }
+
+        fn name(&self) -> &str {
+            "hold"
         }
     }
 
@@ -696,6 +810,28 @@ mod tests {
         .expect("insert drawer");
         db.insert_vector(id, &[0.1, 0.2, 0.3])
             .expect("insert vector");
+    }
+
+    fn insert_triple(
+        db_path: &Path,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+    ) {
+        let db = Database::open(db_path).expect("open db");
+        db.insert_triple(&Triple {
+            id: crate::core::utils::build_triple_id(subject, predicate, object),
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            object: object.to_string(),
+            valid_from: valid_from.map(str::to_string),
+            valid_to: valid_to.map(str::to_string),
+            confidence: 1.0,
+            source_drawer: None,
+        })
+        .expect("insert triple");
     }
 
     async fn run_search(
@@ -813,6 +949,152 @@ mod tests {
         assert_eq!(
             db.schema_version().expect("schema version"),
             baseline_schema
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mcp_fact_check_round_trip() {
+        let (_tempdir, db_path, server) = setup_server();
+        insert_triple(
+            &db_path,
+            "Bob",
+            "husband_of",
+            "Alice",
+            Some("1799900000"),
+            None,
+        );
+        insert_triple(
+            &db_path,
+            "Alice",
+            "works_at",
+            "Acme",
+            Some("1700000000"),
+            Some("1799999999"),
+        );
+
+        let response = server
+            .mempal_fact_check(Parameters(FactCheckRequest {
+                text: "Bob is Alice's brother. Alice works at Acme.".to_string(),
+                wing: None,
+                room: None,
+                now: Some("2027-01-15T08:00:00Z".to_string()),
+            }))
+            .await
+            .expect("fact check should succeed")
+            .0;
+
+        assert_eq!(response.issues.len(), 2, "issues={:?}", response.issues);
+
+        let json = serde_json::to_vec(&response).expect("serialize");
+        let back: FactCheckResponse = serde_json::from_slice(&json).expect("deserialize");
+        assert_eq!(back.issues, response.issues);
+        assert_eq!(back.checked_entities, response.checked_entities);
+        assert_eq!(back.kg_triples_scanned, response.kg_triples_scanned);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_fact_check_invalid_scope_maps_to_invalid_params() {
+        let (_tempdir, _db_path, server) = setup_server();
+
+        let err = match server
+            .mempal_fact_check(Parameters(FactCheckRequest {
+                text: "Bob is Alice's brother".to_string(),
+                wing: None,
+                room: Some("design".to_string()),
+                now: None,
+            }))
+            .await
+        {
+            Ok(_) => panic!("room without wing must be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("room requires wing"),
+            "expected invalid scope error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_fact_check_invalid_now_maps_to_invalid_params() {
+        let (_tempdir, _db_path, server) = setup_server();
+
+        let err = match server
+            .mempal_fact_check(Parameters(FactCheckRequest {
+                text: "Bob is Alice's brother".to_string(),
+                wing: None,
+                room: None,
+                now: Some("not-a-timestamp".to_string()),
+            }))
+            .await
+        {
+            Ok(_) => panic!("invalid now must be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("expected RFC3339"),
+            "expected invalid now error, got: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mcp_ingest_response_exposes_lock_wait() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let db_path = tempdir.path().join("palace.db");
+        Database::open(&db_path).expect("init db before concurrent open_db calls");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let server = Arc::new(MempalMcpServer::new_with_factory(
+            db_path,
+            Arc::new(HoldEmbedderFactory {
+                vector: vec![0.1, 0.2, 0.3],
+                delay: Duration::from_millis(250),
+                entered: Arc::new(Mutex::new(Some(entered_tx))),
+            }),
+        ));
+
+        let request = IngestRequest {
+            content: "same content for lock contention".to_string(),
+            wing: "mempal".to_string(),
+            room: Some("review".to_string()),
+            source: None,
+            importance: None,
+            dry_run: None,
+        };
+
+        let server_a = Arc::clone(&server);
+        let request_a = request.clone();
+        let task_a =
+            tokio::spawn(async move { server_a.mempal_ingest(Parameters(request_a)).await });
+        entered_rx
+            .recv()
+            .expect("first ingest entered embed under lock");
+
+        let server_b = Arc::clone(&server);
+        let task_b = tokio::spawn(async move { server_b.mempal_ingest(Parameters(request)).await });
+
+        let response_a = task_a
+            .await
+            .expect("join a")
+            .expect("ingest a should succeed")
+            .0;
+        let response_b = task_b
+            .await
+            .expect("join b")
+            .expect("ingest b should succeed")
+            .0;
+
+        let waits = [
+            response_a.lock_wait_ms.unwrap_or(0),
+            response_b.lock_wait_ms.unwrap_or(0),
+        ];
+        let waited = waits.into_iter().filter(|ms| *ms > 0).count();
+        assert_eq!(waited, 1, "expected exactly one waiter: {waits:?}");
+
+        let json = serde_json::to_value(&response_a).expect("serialize");
+        assert!(
+            json.get("lock_wait_ms").is_some(),
+            "JSON must expose lock_wait_ms"
         );
     }
 

@@ -114,6 +114,21 @@ You have persistent project memory via mempal. Follow these rules in every sessi
    On InboxFull error: STOP pushing and wait for partner to drain. Do
    NOT retry — that would just fail again.
 
+11. VERIFY BEFORE INGEST (contradiction detection)
+   Before ingesting a decision that asserts relationships between named
+   entities ("X is Y's Z", "X works at Y", "X is the Z of Y"), call
+   mempal_fact_check with the draft text. The tool reports three kinds
+   of issues:
+   - SimilarNameConflict: the mentioned name is ≤2 edit-distance from a
+     known entity (probable typo — Bob vs Bobby).
+   - RelationContradiction: KG already records an incompatible predicate
+     for the same (subject, object) endpoints.
+   - StaleFact: the KG row for the asserted triple has valid_to < now.
+   Treat any surfaced issue as a prompt to confirm with the user before
+   persisting. Fact checking is pure read, zero LLM, zero network.
+   Skip for brainstorming or scratch text — it is for load-bearing
+   claims only.
+
 TOOLS:
   mempal_status        — current state + this protocol + AAAK format spec
   mempal_search        — semantic search with wing/room filters, citation-bearing
@@ -124,6 +139,7 @@ TOOLS:
   mempal_tunnels       — discover cross-wing room links
   mempal_peek_partner  — read partner agent's live session (Claude ↔ Codex), pure read
   mempal_cowork_push   — send a short handoff message to partner agent (P8)
+  mempal_fact_check    — offline contradiction detection vs KG triples + entities (P9)
 
 Key invariant: mempal stores raw text verbatim. Every search result can be
 traced back to a source_file. If you cannot cite the source, you are guessing."#;
